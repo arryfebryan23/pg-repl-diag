@@ -1,32 +1,41 @@
 #!/usr/bin/env bash
 #
-# repl_sampler_standby.sh  —  run ON THE STANDBY (background / systemd)
+# bin/repl_sampler_standby.sh  —  run ON THE STANDBY (background / systemd)
 # -----------------------------------------------------------------------------
-# Periodically samples apply-side metrics into a RAW CSV.
-# When time_lag exceeds the threshold, it performs a BURST CAPTURE: a detailed
-# snapshot of the incident at the moment it occurs.
+# Periodically samples apply-side metrics into a RAW CSV under METRICS_DIR.
+# When time_lag exceeds the threshold, it performs a BURST CAPTURE under
+# BURST_DIR: a detailed snapshot of the incident at the moment it occurs.
 #
 # OUTPUT (append, restart-safe):
-#   $OUTDIR/standby_metrics.csv
-#   $OUTDIR/burst_standby_<ts>.txt
+#   $METRICS_DIR/standby_metrics.csv
+#   $BURST_DIR/burst_standby_<ts>.txt
+#
+# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
 #
 # USAGE:
-#   ./repl_sampler_standby.sh
-#   INTERVAL=10 THRESHOLD_LAG_S=30 OUTDIR=./repl_metrics ./repl_sampler_standby.sh
-#   nohup ./repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
+#   bin/repl_sampler_standby.sh
+#   nohup bin/repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
 # -----------------------------------------------------------------------------
 set -u
 
-INTERVAL="${INTERVAL:-10}"
-THRESHOLD_LAG_S="${THRESHOLD_LAG_S:-30}"
-BURST_COOLDOWN="${BURST_COOLDOWN:-120}"
-COUNT="${COUNT:-0}"
-OUTDIR="${OUTDIR:-./repl_metrics}"
-PGDB="${PGDATABASE:-postgres}"
+# Load central configuration (repl.env) and validation helpers.
+# shellcheck source=../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+
+# Abort if any required tunable or output directory is missing.
+require INTERVAL
+require THRESHOLD_LAG_S
+require BURST_COOLDOWN
+require COUNT
+require METRICS_DIR
+require BURST_DIR
+require PGDATABASE
+
+PGDB="$PGDATABASE"
 
 PSQL="psql -d ${PGDB} -X -At -q -F|"
-CSV="${OUTDIR}/standby_metrics.csv"
-mkdir -p "$OUTDIR"
+CSV="${METRICS_DIR}/standby_metrics.csv"
+ensure_dir "$METRICS_DIR" "$BURST_DIR"
 CLK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
 
 command -v psql >/dev/null 2>&1 || { echo "ERROR: psql not found"; exit 1; }
@@ -106,7 +115,7 @@ while :; do
     # Burst capture
     if python3 -c "exit(0 if float('${tlag:-0}')>${THRESHOLD_LAG_S} else 1)" 2>/dev/null && [ $((EPOCH - last_burst)) -ge "$BURST_COOLDOWN" ]; then
         last_burst="$EPOCH"
-        BF="${OUTDIR}/burst_standby_$(date '+%Y%m%d_%H%M%S').txt"
+        BF="${BURST_DIR}/burst_standby_$(date '+%Y%m%d_%H%M%S').txt"
         {
             echo "=== STANDBY BURST @ ${HUMAN} (time_lag=${tlag}s > ${THRESHOLD_LAG_S}s) ==="
             echo "gap=$(python3 -c "print(f'{$gap/1048576:.1f}MB')") arrival=${arr}MB/s apply=${app}MB/s wait=${wait_ev} disk_util=${util}% cpu_redo=${cpu}%"

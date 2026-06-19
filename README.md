@@ -11,32 +11,80 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 
 ---
 
-## Package Contents
+## Repository Layout
 
-| File | Run on | Type | Purpose |
-|------|--------|------|---------|
-| `repl_collect.sh` | every node | **one-time** | Static OS + DB configuration snapshot |
-| `repl_network_diag.sh` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
-| `repl_apply_diag.sh` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
-| `repl_sampler_primary.sh` | Primary | **periodic** | Sample lag & WAL rate → raw CSV + burst captures |
-| `repl_sampler_standby.sh` | Standby | **periodic** | Sample apply/network/disk/CPU → raw CSV + burst captures |
-| `repl_dashboard.py` | anywhere | offline | Convert raw CSV → interactive HTML dashboard |
+```
+.
+├── repl.env.example     # configuration template (committed)
+├── repl.env             # your local configuration (git-ignored; copy of the example)
+├── bin/                 # executable scripts run by operators
+│   ├── repl_collect.sh
+│   ├── repl_network_diag.sh
+│   ├── repl_apply_diag.sh
+│   ├── repl_sampler_primary.sh
+│   ├── repl_sampler_standby.sh
+│   └── repl_dashboard.py
+├── lib/                 # shared library
+│   └── repl_common.sh   # config loader + validation helpers
+└── output/              # all runtime artifacts (git-ignored, created on demand)
+    ├── metrics/         # sampler CSV files
+    ├── reports/         # static collector reports
+    ├── bursts/          # incident burst captures
+    └── dashboards/      # generated HTML dashboards
+```
+
+All tunables live in **one** place — `repl.env`. Scripts never embed
+configuration values; they load `repl.env` via `lib/repl_common.sh` and **abort**
+if a variable an operation depends on is missing.
 
 ---
 
-## Concept: One-Time vs Periodic
+## Package Contents
 
-- **One-time (static):** OS/PG versions, CPU, disk, TCP sysctl, all `pg_settings`.
-  Collected by `repl_collect.sh`. Run once, or whenever something changes. Useful
-  for **comparing nodes** (why one standby is smooth while another lags).
-- **Periodic (dynamic):** lag, arrival/apply rate, wait events, disk %util, redo
-  CPU, rtt/retransmits. Collected by the samplers. They must sample continuously
-  so that **when an incident occurs, the data is already recorded** even if nobody
-  is watching.
+| Script | Run on | Type | Purpose |
+|--------|--------|------|---------|
+| `bin/repl_collect.sh` | every node | **one-time** | Static OS + DB configuration snapshot |
+| `bin/repl_network_diag.sh` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
+| `bin/repl_apply_diag.sh` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
+| `bin/repl_sampler_primary.sh` | Primary | **periodic** | Sample lag & WAL rate → CSV + burst captures |
+| `bin/repl_sampler_standby.sh` | Standby | **periodic** | Sample apply/network/disk/CPU → CSV + burst captures |
+| `bin/repl_dashboard.py` | anywhere | offline | Convert CSV → interactive HTML dashboard |
 
-> Some metrics are **instantaneous** (wait events, rtt, retransmits) — worthless
-> if inspected after the fact. Hence the tight sampling interval (default 10s) plus
-> automatic **burst capture** when lag crosses the threshold.
+---
+
+## Configuration
+
+```bash
+cp repl.env.example repl.env
+$EDITOR repl.env          # adjust connection, output paths, and tunables
+```
+
+`repl.env` is sourced by bash and uses the `VAR="${VAR:-default}"` form, so any
+value already exported in the environment still takes precedence — per-invocation
+overrides keep working, e.g. `INTERVAL=5 bin/repl_sampler_standby.sh`.
+
+Key settings (full list in `repl.env.example`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` | libpq defaults | PostgreSQL connection |
+| `OUTPUT_DIR` | `./output` | root for all generated artifacts |
+| `METRICS_DIR` / `REPORTS_DIR` / `BURST_DIR` / `DASHBOARD_DIR` | under `OUTPUT_DIR` | per-type output folders |
+| `INTERVAL` | 10 | seconds between sampler samples |
+| `THRESHOLD_LAG_S` | 30 | lag threshold (s) that triggers a burst capture |
+| `BURST_COOLDOWN` | 120 | minimum gap between bursts (s) |
+| `COUNT` | 0 | 0 = sampler runs indefinitely; >0 = stop after N samples |
+| `APPLY_INTERVAL` / `APPLY_COUNT` | 5 / 12 | cadence of the on-demand apply probe |
+| `TARGET` | *(empty, required)* | standby IP for the network test (`iperf3 -s`) |
+| `IPERF_PORT` / `DURATION` / `PARALLEL` / `LINK_MBPS` / `WAL_SAMPLE` | 5201 / 20 / 8 / 1000 / 15 | network test parameters |
+| `PEERS` | *(empty, optional)* | space-separated peer IPs for RTT in the collector |
+
+> Do **not** store the database password in `repl.env` — use `~/.pgpass`
+> (`chmod 600`). Ideally run the scripts as the **`postgres`** user so config
+> files and process-level metrics are readable.
+
+Operations validate the variables they need and **abort** when one is missing —
+e.g. `repl_network_diag.sh` refuses to run without `TARGET`.
 
 ---
 
@@ -49,65 +97,55 @@ sudo yum install -y sysstat iperf3
 sudo apt-get install -y sysstat iperf3
 ```
 
-Passwordless `psql` access — set one of:
-```bash
-export PGHOST=/var/run/postgresql PGPORT=5432 PGUSER=postgres PGDATABASE=postgres
-# or use ~/.pgpass  (chmod 600)
-```
-Ideally run as the **`postgres`** user so the scripts can read config files and
-process-level metrics.
-
 ---
 
 ## Workflow
 
 ### 1) Static snapshot (once, on each node)
 ```bash
-chmod +x repl_collect.sh
+chmod +x bin/repl_collect.sh
 # On the Primary, also measure RTT to both standbys:
-./repl_collect.sh <standby-1-ip> <standby-2-ip>
+bin/repl_collect.sh <standby-1-ip> <standby-2-ip>
 # On the remote standby:
-./repl_collect.sh <primary-ip>
+bin/repl_collect.sh <primary-ip>
 ```
-Output: `repl_collect_<host>_<ts>.txt` (passwords are automatically redacted).
+Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 
 ### 2) Periodic sampling (run continuously)
 
 **On the Primary:**
 ```bash
-chmod +x repl_sampler_primary.sh
-OUTDIR=/var/lib/pgsql/repl_metrics INTERVAL=10 THRESHOLD_LAG_S=30 \
-  nohup ./repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
+chmod +x bin/repl_sampler_primary.sh
+nohup bin/repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
 ```
 
 **On the remote standby:**
 ```bash
-chmod +x repl_sampler_standby.sh
-OUTDIR=/var/lib/pgsql/repl_metrics INTERVAL=10 THRESHOLD_LAG_S=30 \
-  nohup ./repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
+chmod +x bin/repl_sampler_standby.sh
+nohup bin/repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
 ```
-
-Variables:
-| Env | Default | Meaning |
-|-----|---------|---------|
-| `INTERVAL` | 10 | seconds between samples |
-| `THRESHOLD_LAG_S` | 30 | lag threshold (s) that triggers a burst capture |
-| `BURST_COOLDOWN` | 120 | minimum gap between bursts (s) |
-| `OUTDIR` | `./repl_metrics` | output directory for CSV & bursts |
-| `COUNT` | 0 | 0 = run indefinitely; >0 = stop after N samples |
 
 Raw output:
-- `primary_metrics.csv`, `standby_metrics.csv` (append, restart-safe)
-- `burst_primary_<ts>.txt`, `burst_standby_<ts>.txt` (detailed incident snapshots)
+- `output/metrics/primary_metrics.csv`, `output/metrics/standby_metrics.csv` (append, restart-safe)
+- `output/bursts/burst_primary_<ts>.txt`, `output/bursts/burst_standby_<ts>.txt` (incident snapshots)
 
-### 3) Generate the dashboard
-Collect the CSVs from each node into one folder, then:
+### 3) On-demand deep dives
 ```bash
-python3 repl_dashboard.py --metrics-dir ./repl_metrics --out dashboard.html
-# or explicitly:
-python3 repl_dashboard.py --primary primary_metrics.csv --standby standby_metrics.csv --out dashboard.html
+bin/repl_network_diag.sh <standby-ip>   # on the Primary (start 'iperf3 -s' on the standby first)
+bin/repl_apply_diag.sh                  # on the standby
 ```
-Open `dashboard.html` in a browser (local file, no internet required).
+
+### 4) Generate the dashboard
+Collect the CSVs from each node into `output/metrics/`, then:
+```bash
+# load the output paths from repl.env, then render:
+set -a; . ./repl.env; set +a
+python3 bin/repl_dashboard.py
+# or explicitly:
+python3 bin/repl_dashboard.py --metrics-dir ./output/metrics --burst-dir ./output/bursts \
+                              --out ./output/dashboards/dashboard.html
+```
+Open the generated `output/dashboards/dashboard.html` in a browser (local file, no internet required).
 
 ---
 
@@ -121,10 +159,9 @@ After=postgresql.service
 
 [Service]
 User=postgres
-Environment=OUTDIR=/var/lib/pgsql/repl_metrics
-Environment=INTERVAL=10
-Environment=THRESHOLD_LAG_S=30
-ExecStart=/path/repl_sampler_standby.sh   ; use _primary on the primary node
+WorkingDirectory=/opt/repl-diag
+Environment=REPL_ENV_FILE=/opt/repl-diag/repl.env
+ExecStart=/opt/repl-diag/bin/repl_sampler_standby.sh   ; use _primary on the primary node
 Restart=always
 
 [Install]
@@ -161,8 +198,8 @@ High lag?
     └─ high rtt, retransmits ~0       → latency-bound → raise TCP buffers above the BDP
 ```
 
-To prove **NETWORK-BOUND** vs link capacity, run `repl_network_diag.sh`
-(single-stream vs parallel test). For apply-side detail, run `repl_apply_diag.sh`.
+To prove **NETWORK-BOUND** vs link capacity, run `bin/repl_network_diag.sh`
+(single-stream vs parallel test). For apply-side detail, run `bin/repl_apply_diag.sh`.
 
 ---
 

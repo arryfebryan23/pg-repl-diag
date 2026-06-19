@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# repl_apply_diag.sh
+# bin/repl_apply_diag.sh
 # -----------------------------------------------------------------------------
 # Counterpart to repl_network_diag.sh — run this ON THE STANDBY.
 #
@@ -21,19 +21,28 @@
 #   - wait_event   : what the startup process is waiting on (I/O? conflict?)
 #   - disk %util   : utilization of the busiest disk (via iostat)
 #
+# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
+# Cadence is controlled by APPLY_INTERVAL / APPLY_COUNT.
+#
 # USAGE (on the standby):
-#   ./repl_apply_diag.sh                        # default: 5s x 12 = 1 minute
-#   INTERVAL=5 COUNT=24 ./repl_apply_diag.sh    # 2 minutes
-#   (set PGHOST/PGPORT/PGUSER/PGDATABASE if required, or use .pgpass)
+#   bin/repl_apply_diag.sh
+#   APPLY_INTERVAL=5 APPLY_COUNT=24 bin/repl_apply_diag.sh   # override for 2 minutes
 # -----------------------------------------------------------------------------
 
 set -u
 
-# ============================ CONFIGURATION ==================================
-INTERVAL="${INTERVAL:-5}"        # seconds between samples
-COUNT="${COUNT:-12}"             # number of samples (12 x 5s = 1 minute)
-PGDB="${PGDATABASE:-postgres}"
-# =============================================================================
+# Load central configuration (repl.env) and validation helpers.
+# shellcheck source=../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+
+# This probe needs its cadence and DB connectivity defined, otherwise abort.
+require APPLY_INTERVAL
+require APPLY_COUNT
+require PGDATABASE
+
+INTERVAL="$APPLY_INTERVAL"
+COUNT="$APPLY_COUNT"
+PGDB="$PGDATABASE"
 
 red()  { printf '\033[31m%s\033[0m\n' "$*"; }
 grn()  { printf '\033[32m%s\033[0m\n' "$*"; }

@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-repl_dashboard.py — render the raw sampler CSVs into an interactive HTML dashboard.
+bin/repl_dashboard.py — render the raw sampler CSVs into an interactive HTML dashboard.
 
 No external dependencies (standard library only). Charts are drawn with inline
 vanilla-JS canvas code, so the resulting HTML is 100% offline and safe to open
 on air-gapped servers.
 
+CONFIGURATION: default input/output directories are read from the environment
+(METRICS_DIR, BURST_DIR, DASHBOARD_DIR — set in repl.env) and can be overridden
+with CLI flags.
+
 USAGE:
-  python3 repl_dashboard.py --metrics-dir ./repl_metrics --out dashboard.html
-  python3 repl_dashboard.py --primary primary_metrics.csv --standby standby_metrics.csv
+  # using directories from repl.env:
+  set -a; . ./repl.env; set +a
+  python3 bin/repl_dashboard.py
+  # or explicitly:
+  python3 bin/repl_dashboard.py --metrics-dir ./output/metrics --burst-dir ./output/bursts \\
+                                --out ./output/dashboards/dashboard.html
 """
 import argparse, csv, glob, json, os, html
 from datetime import datetime
@@ -52,19 +60,22 @@ def summarize(vals):
     return {"last": ys[-1], "max": max(ys), "avg": round(sum(ys)/len(ys), 2)}
 
 # ---------------------------------------------------------------------------
+# Defaults follow the output layout from repl.env; fall back to ./output/*.
+DEF_METRICS   = os.environ.get("METRICS_DIR", "./output/metrics")
+DEF_BURST     = os.environ.get("BURST_DIR", "./output/bursts")
+DEF_DASHBOARD = os.environ.get("DASHBOARD_DIR", "./output/dashboards")
+
 ap = argparse.ArgumentParser()
-ap.add_argument("--metrics-dir", default=None, help="directory containing *_metrics.csv & burst_*.txt")
-ap.add_argument("--primary", default=None)
-ap.add_argument("--standby", default=None)
-ap.add_argument("--out", default="dashboard.html")
+ap.add_argument("--metrics-dir", default=DEF_METRICS, help="directory containing *_metrics.csv")
+ap.add_argument("--burst-dir", default=DEF_BURST, help="directory containing burst_*.txt")
+ap.add_argument("--primary", default=None, help="explicit path to primary_metrics.csv")
+ap.add_argument("--standby", default=None, help="explicit path to standby_metrics.csv")
+ap.add_argument("--out", default=os.path.join(DEF_DASHBOARD, "dashboard.html"))
 args = ap.parse_args()
 
-primary_csv = args.primary
-standby_csv = args.standby
-burst_dir = args.metrics_dir
-if args.metrics_dir:
-    primary_csv = primary_csv or os.path.join(args.metrics_dir, "primary_metrics.csv")
-    standby_csv = standby_csv or os.path.join(args.metrics_dir, "standby_metrics.csv")
+primary_csv = args.primary or os.path.join(args.metrics_dir, "primary_metrics.csv")
+standby_csv = args.standby or os.path.join(args.metrics_dir, "standby_metrics.csv")
+burst_dir = args.burst_dir
 
 prows = read_csv(primary_csv)
 srows = read_csv(standby_csv)
@@ -340,6 +351,9 @@ out = (TEMPLATE
     .replace("__CARDS__", cards)
     .replace("__BURSTS__", burst_html))
 
+out_dir = os.path.dirname(os.path.abspath(args.out))
+if out_dir:
+    os.makedirs(out_dir, exist_ok=True)
 with open(args.out, "w") as f:
     f.write(out)
 print("Dashboard generated: %s" % args.out)

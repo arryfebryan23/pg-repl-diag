@@ -1,32 +1,41 @@
 #!/usr/bin/env bash
 #
-# repl_sampler_primary.sh  —  run ON THE PRIMARY (background / systemd)
+# bin/repl_sampler_primary.sh  —  run ON THE PRIMARY (background / systemd)
 # -----------------------------------------------------------------------------
-# Periodically samples primary-side replication metrics into a RAW CSV.
-# When any standby's replay_lag exceeds the threshold, it performs a BURST
-# CAPTURE: a detailed snapshot of the incident at the moment it occurs.
+# Periodically samples primary-side replication metrics into a RAW CSV under
+# METRICS_DIR. When any standby's replay_lag exceeds the threshold, it performs
+# a BURST CAPTURE under BURST_DIR: a detailed snapshot of the incident.
 #
 # OUTPUT (append, restart-safe):
-#   $OUTDIR/primary_metrics.csv
-#   $OUTDIR/burst_primary_<ts>.txt   (on incident)
+#   $METRICS_DIR/primary_metrics.csv
+#   $BURST_DIR/burst_primary_<ts>.txt   (on incident)
+#
+# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
 #
 # USAGE:
-#   ./repl_sampler_primary.sh
-#   INTERVAL=10 THRESHOLD_LAG_S=30 OUTDIR=./repl_metrics ./repl_sampler_primary.sh
-#   nohup ./repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
+#   bin/repl_sampler_primary.sh
+#   nohup bin/repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
 # -----------------------------------------------------------------------------
 set -u
 
-INTERVAL="${INTERVAL:-10}"                # seconds between samples
-THRESHOLD_LAG_S="${THRESHOLD_LAG_S:-30}"  # lag threshold (s) that triggers a burst capture
-BURST_COOLDOWN="${BURST_COOLDOWN:-120}"   # minimum gap between bursts (seconds)
-COUNT="${COUNT:-0}"                       # 0 = run indefinitely
-OUTDIR="${OUTDIR:-./repl_metrics}"
-PGDB="${PGDATABASE:-postgres}"
+# Load central configuration (repl.env) and validation helpers.
+# shellcheck source=../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+
+# Abort if any required tunable or output directory is missing.
+require INTERVAL
+require THRESHOLD_LAG_S
+require BURST_COOLDOWN
+require COUNT
+require METRICS_DIR
+require BURST_DIR
+require PGDATABASE
+
+PGDB="$PGDATABASE"
 
 PSQL="psql -d ${PGDB} -X -At -q -F|"
-CSV="${OUTDIR}/primary_metrics.csv"
-mkdir -p "$OUTDIR"
+CSV="${METRICS_DIR}/primary_metrics.csv"
+ensure_dir "$METRICS_DIR" "$BURST_DIR"
 
 command -v psql >/dev/null 2>&1 || { echo "ERROR: psql not found"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
@@ -82,7 +91,7 @@ while :; do
     # Burst capture when the threshold is exceeded and the cooldown has elapsed
     if [ "$max_lag" = "1" ] && [ $((EPOCH - last_burst)) -ge "$BURST_COOLDOWN" ]; then
         last_burst="$EPOCH"
-        BF="${OUTDIR}/burst_primary_$(date '+%Y%m%d_%H%M%S').txt"
+        BF="${BURST_DIR}/burst_primary_$(date '+%Y%m%d_%H%M%S').txt"
         {
             echo "=== PRIMARY BURST @ ${HUMAN} (replay_lag > ${THRESHOLD_LAG_S}s) ==="
             echo "--- pg_stat_replication ---"

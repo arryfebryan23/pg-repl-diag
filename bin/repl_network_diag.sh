@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# repl_network_diag.sh
+# bin/repl_network_diag.sh
 # -----------------------------------------------------------------------------
 # Determines whether replication lag to a standby is caused by a SINGLE TCP
 # STREAM limitation (latency/loss) or by genuine link bandwidth constraints.
@@ -11,28 +11,37 @@
 #     - iperf3, 1 stream   -> mirrors real replication behaviour
 #     - iperf3, N streams  -> measures the true capacity of the link
 #
+# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
+# TARGET is mandatory; the run aborts if it is not set.
+#
 # USAGE:
 #   1. On the RECEIVING standby (the WAL receiver), start an iperf3 server:
 #          iperf3 -s
 #   2. On the PRIMARY (the WAL sender), run this script:
-#          ./repl_network_diag.sh <standby-ip>
+#          bin/repl_network_diag.sh [standby-ip]   # arg overrides TARGET in repl.env
 #
 #   Test direction = Primary -> Standby, matching the direction of WAL flow.
 # -----------------------------------------------------------------------------
 
 set -u
 
-# ============================ CONFIGURATION ==================================
-TARGET="${1:-}"                 # standby IP (iperf3 server)
-IPERF_PORT="${IPERF_PORT:-5201}"
-DURATION="${DURATION:-20}"      # seconds per test
-PARALLEL="${PARALLEL:-8}"       # stream count for the capacity test
-LINK_MBPS="${LINK_MBPS:-1000}"  # assumed effective per-direction bandwidth (Mbps), for BDP
+# Load central configuration (repl.env) and validation helpers.
+# shellcheck source=../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
 
-# -- WAL generation sampling on the Primary (uses libpq env vars if unset) --
-WAL_SAMPLE="${WAL_SAMPLE:-15}"  # seconds to sample WAL rate (run during peak load!)
-PGDB="${PGDATABASE:-postgres}"  # override via PGHOST/PGPORT/PGUSER/PGDATABASE/.pgpass
-# =============================================================================
+# A CLI argument overrides the TARGET defined in repl.env.
+TARGET="${1:-${TARGET:-}}"
+
+# Every value this diagnosis depends on must be present, otherwise abort.
+require TARGET     "standby IP running 'iperf3 -s'"
+require IPERF_PORT
+require DURATION
+require PARALLEL
+require LINK_MBPS
+require WAL_SAMPLE
+require PGDATABASE
+
+PGDB="$PGDATABASE"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grn()   { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -42,7 +51,6 @@ line()  { printf '%s\n' "-------------------------------------------------------
 
 die()   { red "ERROR: $*"; exit 1; }
 
-[ -z "$TARGET" ] && die "Usage: $0 <standby-ip>   (start 'iperf3 -s' on the standby first)"
 command -v iperf3 >/dev/null 2>&1 || die "iperf3 is not installed. Install with: yum/apt install iperf3"
 command -v python3 >/dev/null 2>&1 || die "python3 is required to parse results"
 command -v ping    >/dev/null 2>&1 || die "ping not found"

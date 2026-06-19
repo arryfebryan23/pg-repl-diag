@@ -3,8 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Generated diagnostics output
-repl_metrics/
-repl_collect_*.txt
-burst_*.txt
-dashboard.html
+# Local configuration (copied from repl.env.example; may hold site-specific values)
+repl.env
+
+# All runtime output (metrics, reports, bursts, dashboards)
+output/

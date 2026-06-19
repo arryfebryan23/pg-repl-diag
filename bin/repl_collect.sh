@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #
-# repl_collect.sh
+# bin/repl_collect.sh
 # -----------------------------------------------------------------------------
 # Static configuration collector (OS + PostgreSQL) relevant to replication
 # lag diagnosis. STRICTLY READ-ONLY — it modifies nothing on the host or DB.
 #
 # Run this on EVERY node (Primary, local standby, remote standby) so the
 # outputs can be compared side by side. It produces a single self-contained
-# .txt report suitable for handover to an analyst or vendor.
+# .txt report under REPORTS_DIR, suitable for handover to an analyst or vendor.
+#
+# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
 #
 # USAGE:
-#   ./repl_collect.sh                          # collect local node only
-#   ./repl_collect.sh <peer-ip-1> <peer-ip-2>  # also measure RTT to peers
-#   (set PGHOST/PGPORT/PGUSER/PGDATABASE, or use ~/.pgpass, if required)
+#   bin/repl_collect.sh                          # collect local node only
+#   bin/repl_collect.sh <peer-ip-1> <peer-ip-2>  # also measure RTT to peers
+#                                                # (overrides PEERS from repl.env)
 #
 # Run as the 'postgres' OS user (or root) so configuration files and process
 # level metrics are readable.
@@ -20,11 +22,27 @@
 
 set -u
 
-PGDB="${PGDATABASE:-postgres}"
-PEERS=("$@")
+# Load central configuration (repl.env) and validation helpers.
+# shellcheck source=../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+
+# This collector requires DB connectivity and an output directory.
+require PGDATABASE "PostgreSQL database name"
+require REPORTS_DIR "directory for collector reports"
+
+PGDB="$PGDATABASE"
+
+# Peer IPs for RTT: CLI arguments override the PEERS value from repl.env.
+if [ "$#" -gt 0 ]; then
+    PEERS=("$@")
+else
+    read -r -a PEERS <<< "${PEERS:-}"
+fi
+
 TS="$(date +%Y%m%d_%H%M%S)"
 HOST="$(hostname 2>/dev/null || echo node)"
-OUT="repl_collect_${HOST}_${TS}.txt"
+ensure_dir "$REPORTS_DIR"
+OUT="${REPORTS_DIR}/repl_collect_${HOST}_${TS}.txt"
 
 PSQL_S="psql -d ${PGDB} -X -At -q"            # scalar query helper
 PSQL_T="psql -d ${PGDB} -X -q -P pager=off"   # tabular query helper
@@ -114,7 +132,7 @@ run "Global retransmit counters" sh -c "netstat -s 2>/dev/null | grep -i -E 'ret
 # ---------------------------------------------------------------------------
 sec "9. RTT TO PEERS"
 if [ "${#PEERS[@]}" -eq 0 ]; then
-    echo "(no peer IPs supplied. Run: $0 <peer-ip-1> <peer-ip-2>)"
+    echo "(no peer IPs supplied. Set PEERS in repl.env, or run: $0 <peer-ip-1> <peer-ip-2>)"
 else
     for P in "${PEERS[@]}"; do
         sub "ping $P"; ping -c 20 -i 0.2 -q "$P" 2>&1 | grep -E 'loss|rtt|round-trip' || echo "(unreachable)"
