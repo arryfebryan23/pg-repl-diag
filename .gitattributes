@@ -1,0 +1,10 @@
+# Normalize line endings: keep LF for files that run on Linux servers
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+
+# Treat compiled/binary artifacts as binary (no EOL conversion)
+*.pyc  binary
+*.zip  binary
