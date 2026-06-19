@@ -1,44 +1,46 @@
-# Replication Lag Diagnostics Toolkit (PostgreSQL)
+# PostgreSQL Replication Lag Diagnostics Toolkit
 
-Toolkit untuk mendiagnosa **replication lag** pada topologi multi-site
-(mis. Primary Jakarta → Slave Jakarta → Slave Surabaya). Memisahkan dua akar
-masalah yang sering tertukar: **bottleneck network** (single-stream TCP) vs
-**bottleneck apply** (disk/CPU standby).
+A toolkit for diagnosing **replication lag** in multi-site PostgreSQL topologies
+(e.g. Primary → local standby → remote DR standby). It separates the two root
+causes that are routinely confused: a **network bottleneck** (single-stream TCP)
+versus an **apply bottleneck** (standby disk/CPU).
 
-Semua script **read-only** terhadap database dan **tanpa dependensi eksternal**
-(hanya `bash`, `psql`, `python3`; `iostat`/`mpstat` dari paket `sysstat` opsional).
-
----
-
-## Isi Paket
-
-| File | Jalankan di | Sifat | Fungsi |
-|------|-------------|-------|--------|
-| `repl_collect.sh` | semua node | **one-time** | Snapshot konfigurasi OS + DB (statis) |
-| `repl_network_diag.sh` | Primary | on-demand | Uji single-stream vs paralel (iperf3) + laju WAL |
-| `repl_apply_diag.sh` | Standby | on-demand | Monitor apply gap, wait event, disk, CPU redo |
-| `repl_sampler_primary.sh` | Primary | **periodik** | Sampling lag & laju WAL → CSV raw + burst |
-| `repl_sampler_standby.sh` | Standby | **periodik** | Sampling apply/network/disk/CPU → CSV raw + burst |
-| `repl_dashboard.py` | mana saja | offline | Ubah CSV raw → dashboard HTML interaktif |
+All scripts are **read-only** against the database and have **no external
+dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
+`sysstat` package are optional).
 
 ---
 
-## Konsep: One-Time vs Periodik
+## Package Contents
 
-- **One-time (statis):** versi OS/PG, CPU, disk, sysctl TCP, semua `pg_settings`.
-  Dikumpulkan `repl_collect.sh`. Cukup sekali / saat ada perubahan. Berguna untuk
-  **membandingkan antar node** (kenapa JKT mulus, SBY lag).
-- **Periodik (dinamis):** lag, apply/arrival rate, wait event, disk %util, CPU redo,
-  rtt/retransmit. Dikumpulkan sampler. Harus sampling terus agar **saat insiden
-  terjadi, datanya sudah tercatat** walau tidak ada yang menunggui.
-
-> Beberapa metrik bersifat **instan** (wait event, rtt, retransmit) — tak bernilai
-> bila dilihat belakangan. Karena itu sampling rapat (default 10 detik) + **burst
-> capture** otomatis saat lag melewati ambang.
+| File | Run on | Type | Purpose |
+|------|--------|------|---------|
+| `repl_collect.sh` | every node | **one-time** | Static OS + DB configuration snapshot |
+| `repl_network_diag.sh` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
+| `repl_apply_diag.sh` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
+| `repl_sampler_primary.sh` | Primary | **periodic** | Sample lag & WAL rate → raw CSV + burst captures |
+| `repl_sampler_standby.sh` | Standby | **periodic** | Sample apply/network/disk/CPU → raw CSV + burst captures |
+| `repl_dashboard.py` | anywhere | offline | Convert raw CSV → interactive HTML dashboard |
 
 ---
 
-## Prasyarat
+## Concept: One-Time vs Periodic
+
+- **One-time (static):** OS/PG versions, CPU, disk, TCP sysctl, all `pg_settings`.
+  Collected by `repl_collect.sh`. Run once, or whenever something changes. Useful
+  for **comparing nodes** (why one standby is smooth while another lags).
+- **Periodic (dynamic):** lag, arrival/apply rate, wait events, disk %util, redo
+  CPU, rtt/retransmits. Collected by the samplers. They must sample continuously
+  so that **when an incident occurs, the data is already recorded** even if nobody
+  is watching.
+
+> Some metrics are **instantaneous** (wait events, rtt, retransmits) — worthless
+> if inspected after the fact. Hence the tight sampling interval (default 10s) plus
+> automatic **burst capture** when lag crosses the threshold.
+
+---
+
+## Prerequisites
 
 ```bash
 # RHEL/Rocky
@@ -47,68 +49,69 @@ sudo yum install -y sysstat iperf3
 sudo apt-get install -y sysstat iperf3
 ```
 
-Akses `psql` tanpa prompt password — set salah satu:
+Passwordless `psql` access — set one of:
 ```bash
 export PGHOST=/var/run/postgresql PGPORT=5432 PGUSER=postgres PGDATABASE=postgres
-# atau gunakan ~/.pgpass  (chmod 600)
+# or use ~/.pgpass  (chmod 600)
 ```
-Idealnya dijalankan sebagai user **`postgres`** agar bisa baca file config & metrik proses.
+Ideally run as the **`postgres`** user so the scripts can read config files and
+process-level metrics.
 
 ---
 
-## Alur Pakai
+## Workflow
 
-### 1) Snapshot statis (sekali, di tiap node)
+### 1) Static snapshot (once, on each node)
 ```bash
 chmod +x repl_collect.sh
-# di Primary, sekalian ukur RTT ke kedua slave:
-./repl_collect.sh <ip-slave-jkt> <ip-slave-sby>
-# di Slave SBY:
-./repl_collect.sh <ip-primary>
+# On the Primary, also measure RTT to both standbys:
+./repl_collect.sh <standby-1-ip> <standby-2-ip>
+# On the remote standby:
+./repl_collect.sh <primary-ip>
 ```
-Hasil: `repl_collect_<host>_<ts>.txt` (password otomatis diredaksi).
+Output: `repl_collect_<host>_<ts>.txt` (passwords are automatically redacted).
 
-### 2) Sampling periodik (jalan terus)
+### 2) Periodic sampling (run continuously)
 
-**Di Primary:**
+**On the Primary:**
 ```bash
 chmod +x repl_sampler_primary.sh
 OUTDIR=/var/lib/pgsql/repl_metrics INTERVAL=10 THRESHOLD_LAG_S=30 \
   nohup ./repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
 ```
 
-**Di Standby Surabaya:**
+**On the remote standby:**
 ```bash
 chmod +x repl_sampler_standby.sh
 OUTDIR=/var/lib/pgsql/repl_metrics INTERVAL=10 THRESHOLD_LAG_S=30 \
   nohup ./repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
 ```
 
-Variabel:
-| Env | Default | Arti |
-|-----|---------|------|
-| `INTERVAL` | 10 | detik antar sampel |
-| `THRESHOLD_LAG_S` | 30 | ambang lag (detik) pemicu burst capture |
-| `BURST_COOLDOWN` | 120 | jeda minimal antar burst (detik) |
-| `OUTDIR` | `./repl_metrics` | folder output CSV & burst |
-| `COUNT` | 0 | 0 = jalan terus; >0 = berhenti setelah N sampel |
+Variables:
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `INTERVAL` | 10 | seconds between samples |
+| `THRESHOLD_LAG_S` | 30 | lag threshold (s) that triggers a burst capture |
+| `BURST_COOLDOWN` | 120 | minimum gap between bursts (s) |
+| `OUTDIR` | `./repl_metrics` | output directory for CSV & bursts |
+| `COUNT` | 0 | 0 = run indefinitely; >0 = stop after N samples |
 
-Output raw:
-- `primary_metrics.csv`, `standby_metrics.csv` (append, aman saat restart)
-- `burst_primary_<ts>.txt`, `burst_standby_<ts>.txt` (snapshot detail saat insiden)
+Raw output:
+- `primary_metrics.csv`, `standby_metrics.csv` (append, restart-safe)
+- `burst_primary_<ts>.txt`, `burst_standby_<ts>.txt` (detailed incident snapshots)
 
-### 3) Generate dashboard
-Kumpulkan CSV dari node ke satu folder, lalu:
+### 3) Generate the dashboard
+Collect the CSVs from each node into one folder, then:
 ```bash
 python3 repl_dashboard.py --metrics-dir ./repl_metrics --out dashboard.html
-# atau eksplisit:
+# or explicitly:
 python3 repl_dashboard.py --primary primary_metrics.csv --standby standby_metrics.csv --out dashboard.html
 ```
-Buka `dashboard.html` di browser (file lokal, tanpa internet).
+Open `dashboard.html` in a browser (local file, no internet required).
 
 ---
 
-## Menjalankan sebagai systemd service (opsional, lebih rapi)
+## Running as a systemd service (optional, cleaner)
 
 `/etc/systemd/system/repl-sampler.service`:
 ```ini
@@ -121,7 +124,7 @@ User=postgres
 Environment=OUTDIR=/var/lib/pgsql/repl_metrics
 Environment=INTERVAL=10
 Environment=THRESHOLD_LAG_S=30
-ExecStart=/path/repl_sampler_standby.sh   ; ganti _primary di node primary
+ExecStart=/path/repl_sampler_standby.sh   ; use _primary on the primary node
 Restart=always
 
 [Install]
@@ -133,42 +136,41 @@ sudo systemctl daemon-reload && sudo systemctl enable --now repl-sampler
 
 ---
 
-## Membaca Dashboard
+## Reading the Dashboard
 
-Panel atas memberi **VONIS otomatis** + kartu ringkasan. Grafik utama:
+The top panel provides an **automatic verdict** plus summary cards. Key charts:
 
-- **Replication Lag (time_lag)** — masalah yang user rasakan.
-- **Arrival vs Apply Rate** — kalau garis *apply* < *arrival*, standby tertinggal → apply-bound.
-- **Apply Gap** — kalau terus naik → apply tidak mengejar.
-- **Saturasi Resource** — disk %util & CPU redo (skala 0–100). Korelasikan dengan lonjakan lag.
-- **Kualitas Network** — rtt & retransmit socket replikasi.
-- **Distribusi Wait Event** — di mana proses redo menghabiskan waktu.
-- **Laju WAL (primary)** & **lag per standby** — bandingkan SBY vs JKT.
+- **Replication Lag (time_lag)** — the symptom users feel.
+- **Arrival vs Apply Rate** — if *apply* < *arrival*, the standby is falling behind → apply-bound.
+- **Apply Gap** — if it keeps rising → apply is not catching up.
+- **Resource Saturation** — disk %util & redo CPU (0–100 scale). Correlate with lag spikes.
+- **Network Quality** — rtt & retransmits on the replication socket.
+- **Wait Event Distribution** — where the redo process spends its time.
+- **WAL Generation Rate (primary)** & **per-standby lag** — compare standbys.
 
-### Pohon Keputusan
+### Decision Tree
 
 ```
-Lag tinggi?
-├─ Apply < Arrival  &  gap membesar  → APPLY-BOUND
-│   ├─ disk %util tinggi / wait IO    → DISK I/O standby (upgrade storage, pisah WAL)
-│   ├─ CPU redo ~100% (1 core)        → CPU single-thread (clock per-core, kurangi WAL)
-│   └─ ada Recovery/Conflict wait     → konflik query (tune hot_standby_feedback)
-└─ Arrival rendah, apply tidak numpuk → NETWORK-BOUND
-    ├─ retransmit naik / loss          → loss-bound  → ganti congestion control ke BBR
-    └─ rtt tinggi, retransmit ~0       → latency-bound → besarkan TCP buffer > BDP
+High lag?
+├─ Apply < Arrival  &  gap growing  → APPLY-BOUND
+│   ├─ high disk %util / IO waits    → standby disk I/O (upgrade storage, separate WAL)
+│   ├─ redo CPU ~100% (1 core)       → single-thread CPU (higher per-core clock, reduce WAL)
+│   └─ Recovery/Conflict waits       → query conflict (tune hot_standby_feedback)
+└─ Low arrival, no apply backlog → NETWORK-BOUND
+    ├─ rising retransmits / loss      → loss-bound    → switch congestion control to BBR
+    └─ high rtt, retransmits ~0       → latency-bound → raise TCP buffers above the BDP
 ```
 
-Untuk membuktikan **NETWORK-BOUND** vs kapasitas link, jalankan `repl_network_diag.sh`
-(uji single-stream vs paralel). Untuk detail sisi apply, `repl_apply_diag.sh`.
+To prove **NETWORK-BOUND** vs link capacity, run `repl_network_diag.sh`
+(single-stream vs parallel test). For apply-side detail, run `repl_apply_diag.sh`.
 
 ---
 
-## Catatan
+## Notes
 
-- Jalankan sampler **sebelum** insiden agar history bergulir menangkap kejadian.
-- Sampling saat **jam sibuk / batch** memberi gambaran laju WAL puncak (penentu lag).
-- Semua output yang memuat `primary_conninfo`/socket diredaksi passwordnya.
-- Untuk pemantauan jangka panjang yang lebih kuat, pertimbangkan
-  Prometheus + `postgres_exporter` + `node_exporter`. Toolkit ini untuk
-  diagnosa cepat tanpa setup besar.
+- Start the samplers **before** an incident so the rolling history captures it.
+- Sampling during **peak / batch hours** reveals the peak WAL rate, which drives lag.
+- All output containing `primary_conninfo`/socket data has passwords redacted.
+- For stronger long-term monitoring, consider Prometheus + `postgres_exporter` +
+  `node_exporter`. This toolkit is for fast diagnosis without heavy setup.
 ```

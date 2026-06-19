@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-repl_dashboard.py — ubah RAW CSV dari sampler menjadi dashboard HTML interaktif.
+repl_dashboard.py — render the raw sampler CSVs into an interactive HTML dashboard.
 
-Tanpa dependensi eksternal (hanya stdlib). Grafik digambar dengan canvas
-vanilla JS yang ditempel inline -> HTML 100% offline, aman untuk server air-gapped.
+No external dependencies (standard library only). Charts are drawn with inline
+vanilla-JS canvas code, so the resulting HTML is 100% offline and safe to open
+on air-gapped servers.
 
-PAKAI:
+USAGE:
   python3 repl_dashboard.py --metrics-dir ./repl_metrics --out dashboard.html
   python3 repl_dashboard.py --primary primary_metrics.csv --standby standby_metrics.csv
 """
@@ -52,7 +53,7 @@ def summarize(vals):
 
 # ---------------------------------------------------------------------------
 ap = argparse.ArgumentParser()
-ap.add_argument("--metrics-dir", default=None, help="folder berisi *_metrics.csv & burst_*.txt")
+ap.add_argument("--metrics-dir", default=None, help="directory containing *_metrics.csv & burst_*.txt")
 ap.add_argument("--primary", default=None)
 ap.add_argument("--standby", default=None)
 ap.add_argument("--out", default="dashboard.html")
@@ -68,7 +69,7 @@ if args.metrics_dir:
 prows = read_csv(primary_csv)
 srows = read_csv(standby_csv)
 
-# ---- bangun data PRIMARY ----
+# ---- build PRIMARY data ----
 primary = {"wal_rate": [], "standbys": {}}
 seen_ts = set()
 for r in prows:
@@ -85,7 +86,7 @@ for r in prows:
     if x is not None and rl is not None: d["replay_lag"].append({"x": x, "y": rl})
     if x is not None and tl is not None: d["total_lag_mb"].append({"x": x, "y": round(tl/1048576.0, 2)})
 
-# ---- bangun data STANDBY ----
+# ---- build STANDBY data ----
 standby = {
     "time_lag":   series(srows, "time_lag_s"),
     "arrival":    series(srows, "arrival_mbps"),
@@ -102,8 +103,8 @@ for r in srows:
     if we and we not in ("-", "-/-", "-/running"):
         standby["waitevents"][we] = standby["waitevents"].get(we, 0) + 1
 
-# ---- verdict heuristik ----
-verdict, vclass, notes = "Belum cukup data", "warn", []
+# ---- heuristic verdict ----
+verdict, vclass, notes = "Insufficient data", "warn", []
 s_lag = summarize(standby["time_lag"])
 s_arr = summarize(standby["arrival"]); s_app = summarize(standby["apply"])
 s_util = summarize(standby["disk_util"]); s_cpu = summarize(standby["cpu_startup"])
@@ -115,26 +116,26 @@ if srows:
     apply_slower = (s_arr["avg"] is not None and s_app["avg"] is not None and s_app["avg"] < s_arr["avg"]*0.9)
     if (s_lag["max"] or 0) > 30 and apply_slower:
         if (s_util["max"] or 0) > 80:
-            verdict, vclass = "APPLY-BOUND → DISK I/O di standby", "bad"
-            notes.append("Disk %%util puncak %.0f%% saat lag tinggi." % s_util["max"])
+            verdict, vclass = "APPLY-BOUND -> standby disk I/O", "bad"
+            notes.append("Disk %%util peaked at %.0f%% during high lag." % s_util["max"])
         elif (s_cpu["max"] or 0) > 85:
-            verdict, vclass = "APPLY-BOUND → CPU single-thread (redo)", "bad"
-            notes.append("CPU proses startup puncak %.0f%% (1 core mentok)." % s_cpu["max"])
+            verdict, vclass = "APPLY-BOUND -> single-thread CPU (redo)", "bad"
+            notes.append("Startup process CPU peaked at %.0f%% (one core saturated)." % s_cpu["max"])
         else:
-            verdict, vclass = "APPLY-BOUND → standby tak mengejar WAL", "bad"
-        notes.append("Apply rata-rata %.2f MB/s < arrival %.2f MB/s." % (s_app["avg"] or 0, s_arr["avg"] or 0))
+            verdict, vclass = "APPLY-BOUND -> standby not keeping up with WAL", "bad"
+        notes.append("Average apply %.2f MB/s < arrival %.2f MB/s." % (s_app["avg"] or 0, s_arr["avg"] or 0))
     elif (s_lag["max"] or 0) > 30 and (s_arr["avg"] or 0) < 1.0:
-        verdict, vclass = "Diduga NETWORK-BOUND (WAL datang lambat)", "warn"
-        notes.append("Arrival rendah (%.2f MB/s) padahal lag tinggi." % (s_arr["avg"] or 0))
+        verdict, vclass = "Likely NETWORK-BOUND (WAL arriving slowly)", "warn"
+        notes.append("Low arrival (%.2f MB/s) despite high lag." % (s_arr["avg"] or 0))
         if retr_delta and retr_delta > 0:
-            notes.append("Retransmit naik %d selama periode → indikasi packet loss." % int(retr_delta))
+            notes.append("Retransmits rose by %d over the period -> indicates packet loss." % int(retr_delta))
     elif (s_lag["max"] or 0) <= 30:
-        verdict, vclass = "SEHAT (lag terkendali pada periode ini)", "good"
-        notes.append("time_lag puncak %.1f s." % (s_lag["max"] or 0))
+        verdict, vclass = "HEALTHY (lag under control during this period)", "good"
+        notes.append("Peak time_lag %.1f s." % (s_lag["max"] or 0))
 elif prows:
-    verdict, vclass = "Data primary tersedia (lihat grafik lag per standby)", "warn"
+    verdict, vclass = "Primary data available (see per-standby lag charts)", "warn"
 
-# ---- daftar burst ----
+# ---- burst incident list ----
 bursts = []
 if burst_dir and os.path.isdir(burst_dir):
     for bf in sorted(glob.glob(os.path.join(burst_dir, "burst_*.txt"))):
@@ -152,9 +153,9 @@ meta = {
 # summary HTML cards
 def card(title, sm, unit):
     if not sm or sm["last"] is None:
-        return '<div class="card"><h4>%s</h4><div class="big">–</div></div>' % html.escape(title)
+        return '<div class="card"><h4>%s</h4><div class="big">-</div></div>' % html.escape(title)
     return ('<div class="card"><h4>%s</h4><div class="big">%s<span>%s</span></div>'
-            '<div class="sub">puncak %s · rata2 %s</div></div>') % (
+            '<div class="sub">peak %s · avg %s</div></div>') % (
             html.escape(title), sm["last"], unit, sm["max"], sm["avg"])
 
 cards = "".join([
@@ -163,17 +164,17 @@ cards = "".join([
     card("Arrival rate", s_arr, " MB/s"),
     card("Disk %util (standby)", s_util, " %"),
     card("CPU redo (startup)", s_cpu, " %"),
-    card("RTT socket", summarize(standby["rtt"]), " ms"),
+    card("Socket RTT", summarize(standby["rtt"]), " ms"),
 ])
 notes_html = "".join("<li>%s</li>" % html.escape(n) for n in notes)
 burst_html = ("".join('<li><b>%s</b> — %s</li>' % (html.escape(b["file"]), html.escape(b["head"]))
-              for b in bursts) or "<li>Tidak ada insiden burst tercatat.</li>")
+              for b in bursts) or "<li>No burst incidents recorded.</li>")
 
 DATA = {"primary": primary, "standby": standby, "meta": meta}
 
 # ===========================================================================
 TEMPLATE = r"""<!doctype html>
-<html lang="id"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Replication Diagnostics Dashboard</title>
 <style>
@@ -211,15 +212,15 @@ TEMPLATE = r"""<!doctype html>
 <body>
 <header>
   <h1>PostgreSQL Replication Diagnostics</h1>
-  <div class="meta">Dibuat __GEN__ · primary: __PROWS__ baris · standby: __SROWS__ baris</div>
+  <div class="meta">Generated __GEN__ · primary: __PROWS__ rows · standby: __SROWS__ rows</div>
 </header>
 <div class="wrap">
-  <div class="verdict __VCLASS__">VONIS: __VERDICT__<ul>__NOTES__</ul></div>
+  <div class="verdict __VCLASS__">VERDICT: __VERDICT__<ul>__NOTES__</ul></div>
   <div class="cards">__CARDS__</div>
   <div id="charts"></div>
-  <div class="burst"><h3>Insiden (burst capture)</h3><ul>__BURSTS__</ul></div>
+  <div class="burst"><h3>Incidents (burst captures)</h3><ul>__BURSTS__</ul></div>
 </div>
-<footer>Self-contained · digambar offline tanpa library eksternal</footer>
+<footer>Self-contained · rendered offline with no external libraries</footer>
 
 <script>
 const DATA = __DATA__;
@@ -233,7 +234,7 @@ function drawChart(canvas, cfg){
   const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
   const W=cssW,H=cssH,padL=52,padR=14,padT=10,padB=24;
   const all=[].concat(...cfg.series.map(s=>s.data));
-  if(all.length===0){ctx.fillStyle='#8b98a5';ctx.font='13px sans-serif';ctx.fillText('(tidak ada data)',padL,H/2);return;}
+  if(all.length===0){ctx.fillStyle='#8b98a5';ctx.font='13px sans-serif';ctx.fillText('(no data)',padL,H/2);return;}
   const xs=all.map(p=>p.x), ys=all.map(p=>p.y);
   let xMin=Math.min(...xs),xMax=Math.max(...xs);
   let yMin=0,yMax=cfg.yMax!=null?cfg.yMax:Math.max(...ys,0.0001);
@@ -285,7 +286,7 @@ function barBlock(title,hint,obj){
   const ent=Object.entries(obj).sort((a,b)=>b[1]-a[1]);
   const max=ent.length?ent[0][1]:1;
   let h='<h3>'+title+'</h3><div class="hint">'+hint+'</div><div class="bars">';
-  if(!ent.length)h+='<div class="empty">(tidak ada wait event tercatat)</div>';
+  if(!ent.length)h+='<div class="empty">(no wait events recorded)</div>';
   ent.forEach(([k,v])=>{h+='<div class="bar"><span style="width:170px">'+k+'</span><div class="track"><div class="fill" style="width:'+(v/max*100)+'%"></div></div><span>'+v+'</span></div>';});
   h+='</div>';d.innerHTML=h;document.getElementById('charts').appendChild(d);
 }
@@ -295,34 +296,34 @@ const C={lag:'#f85149',apply:'#2ea043',arr:'#4aa8ff',gap:'#d29922',util:'#bc8cff
 
 // --- STANDBY charts ---
 if(DATA.meta.standby_rows>0){
-  chartBlock('Replication Lag (time_lag)','Umur transaksi terakhir yang ter-apply. Inti masalah.',
+  chartBlock('Replication Lag (time_lag)','Age of the last applied transaction. The core symptom.',
     {yMax:null,series:[{name:'time_lag (s)',color:C.lag,data:S.time_lag}]});
-  chartBlock('Arrival vs Apply Rate','WAL datang vs WAL di-apply. Apply < arrival = standby tertinggal.',
+  chartBlock('Arrival vs Apply Rate','WAL received vs WAL applied. Apply < arrival = standby falling behind.',
     {series:[{name:'arrival (MB/s)',color:C.arr,data:S.arrival},{name:'apply (MB/s)',color:C.apply,data:S.apply}]});
-  chartBlock('Apply Gap','WAL diterima tapi belum di-apply. Membesar = apply-bound.',
+  chartBlock('Apply Gap','WAL received but not yet applied. Growing = apply-bound.',
     {series:[{name:'gap (MB)',color:C.gap,data:S.gap_mb}]});
-  chartBlock('Saturasi Resource (standby)','Korelasikan lonjakan lag dengan disk / CPU redo.',
+  chartBlock('Resource Saturation (standby)','Correlate lag spikes with disk / CPU redo.',
     {yMax:100,series:[{name:'disk %util',color:C.util,data:S.disk_util},{name:'CPU redo %',color:C.cpu,data:S.cpu_startup}]});
-  chartBlock('Kualitas Network (socket replikasi)','RTT & retransmit dari koneksi walreceiver.',
+  chartBlock('Network Quality (replication socket)','RTT & retransmits on the walreceiver connection.',
     {series:[{name:'rtt (ms)',color:C.rtt,data:S.rtt},{name:'retrans (total)',color:C.retr,data:S.retrans}]});
-  barBlock('Distribusi Wait Event (proses redo)','Di mana proses startup menghabiskan waktu.',S.waitevents);
+  barBlock('Wait Event Distribution (redo process)','Where the startup process spends its time.',S.waitevents);
 }
 
 // --- PRIMARY charts ---
 if(DATA.meta.primary_rows>0){
-  chartBlock('Laju Generate WAL (primary)','Lonjakan = batch/checkpoint. Bandingkan dgn apply standby.',
+  chartBlock('WAL Generation Rate (primary)','Spikes = batch/checkpoint. Compare against standby apply.',
     {series:[{name:'WAL rate (MB/s)',color:C.wal,data:P.wal_rate}]});
   const names=Object.keys(P.standbys);
   if(names.length){
     const pal=['#f85149','#4aa8ff','#2ea043','#d29922','#bc8cff'];
-    chartBlock('replay_lag per Standby (dari primary)','Bandingkan standby JKT vs SBY.',
+    chartBlock('replay_lag per Standby (from primary)','Compare standbys side by side.',
       {series:names.map((n,i)=>({name:n,color:pal[i%pal.length],data:P.standbys[n].replay_lag}))});
-    chartBlock('Total Lag per Standby (bytes)','Selisih sent vs replay LSN per standby.',
+    chartBlock('Total Lag per Standby (bytes)','Difference between sent and replay LSN per standby.',
       {series:names.map((n,i)=>({name:n,color:pal[i%pal.length],data:P.standbys[n].total_lag_mb}))});
   }
 }
 if(DATA.meta.primary_rows===0 && DATA.meta.standby_rows===0){
-  document.getElementById('charts').innerHTML='<div class="empty">Tidak ada data. Pastikan CSV sampler sudah terisi.</div>';
+  document.getElementById('charts').innerHTML='<div class="empty">No data. Ensure the sampler CSVs are populated.</div>';
 }
 window.addEventListener('resize',()=>location.reload());
 </script>
@@ -341,6 +342,6 @@ out = (TEMPLATE
 
 with open(args.out, "w") as f:
     f.write(out)
-print("Dashboard dibuat: %s" % args.out)
+print("Dashboard generated: %s" % args.out)
 print("  primary rows: %d | standby rows: %d | bursts: %d" %
       (meta["primary_rows"], meta["standby_rows"], len(bursts)))
