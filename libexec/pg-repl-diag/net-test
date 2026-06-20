@@ -154,6 +154,11 @@ section "[PHASE 6] ANALYSIS"
 BDP_BYTES="$(python3 -c "print(int(${LINK_MBPS}*1e6/8 * ${RTT_AVG}/1000))" 2>/dev/null)"
 BDP_MB="$(python3 -c "print(f'{${BDP_BYTES}/1048576:.2f}')" 2>/dev/null)"
 
+# Recommended socket-buffer ceiling: 4 x BDP, with a 16 MB floor for when RTT is
+# unknown/tiny (a single stream over a fast link still benefits from ~16 MB).
+BUF_BYTES="$(python3 -c "print(max(int(${BDP_BYTES:-0})*4, 16*1024*1024))" 2>/dev/null)"
+BUF_MB="$(python3 -c "print(f'{${BUF_BYTES}/1048576:.1f}')" 2>/dev/null)"
+
 # Parallel-vs-single ratio
 RATIO="$(python3 -c "
 s=${SINGLE_MBPS:-0}; m=${MULTI_MBPS:-0}
@@ -167,27 +172,65 @@ kv "Parallel / single"      "${RATIO}x"
 HIGH_LOSS="$(python3 -c "print(1 if float(${LOSS})>0.1 else 0)")"
 SINGLE_BOUND="$(python3 -c "print(1 if float('${RATIO}')>=2.0 else 0)")"
 
+# --- Recommendation builders (each one states the NODE the setting belongs on) ---
+recommend_bbr() {
+    action "Switch congestion control to BBR — it holds throughput under loss far better than CUBIC."
+    note   "Needs Linux kernel >= 4.9 and the 'fq' qdisc (BBR relies on its pacing)."
+    subsection "Apply on the PRIMARY — the WAL sender (this host)"
+    bullet "net.core.default_qdisc = fq"
+    bullet "net.ipv4.tcp_congestion_control = bbr"
+    note   "BBR governs the SENDER's rate, so for Primary -> standby flow only the Primary needs it."
+    note   "A cascade node that also feeds a downstream standby needs BBR too (it is a sender as well)."
+}
+
+recommend_buffers() {
+    action "Enlarge TCP socket buffers so the single-stream window can exceed the BDP (${BDP_MB} MB)."
+    note   "The usable window is capped by the SENDER's wmem AND the RECEIVER's rmem -> tune BOTH nodes."
+    subsection "On the PRIMARY — WAL sender (this host): SEND buffers"
+    bullet "net.core.wmem_max = ${BUF_BYTES}            # ${BUF_MB} MB"
+    bullet "net.ipv4.tcp_wmem = 4096 65536 ${BUF_BYTES}"
+    bullet "net.ipv4.tcp_slow_start_after_idle = 0      # keep the window open between WAL bursts"
+    bullet "net.ipv4.tcp_window_scaling = 1             # mandatory for windows > 64 KB"
+    subsection "On the STANDBY ${TARGET} — WAL receiver: RECEIVE buffers"
+    bullet "net.core.rmem_max = ${BUF_BYTES}            # ${BUF_MB} MB"
+    bullet "net.ipv4.tcp_rmem = 4096 131072 ${BUF_BYTES}"
+    bullet "net.ipv4.tcp_window_scaling = 1"
+    note   "Over WAN links that drop large packets, also set net.ipv4.tcp_mtu_probing = 1 on both ends."
+    if python3 -c "exit(0 if float('${RTT_AVG:-0}')<=0 else 1)" 2>/dev/null; then
+        note "(RTT was unmeasured, so ${BUF_MB} MB is a 16 MB floor, not a true 4xBDP — refine once RTT is known.)"
+    fi
+}
+
+recommend_apply() {
+    subsection "How to apply & verify"
+    bullet "Test live (non-persistent), running each command ON the node named above:"
+    note   "sudo sysctl -w <key>=<value>"
+    bullet "Persist across reboots (same node):"
+    note   "echo '<key> = <value>' | sudo tee -a /etc/sysctl.d/90-pg-repl.conf && sudo sysctl --system"
+    bullet "Re-open the stream so it picks up the new window: restart the standby, or briefly"
+    note   "stop/start its walreceiver — an existing connection keeps its old (small) buffers."
+    bullet "Confirm: re-run  pg-repl-diag net-test ${TARGET}  and check single-stream throughput rose."
+}
+
 if [ "$SINGLE_BOUND" = "1" ]; then
     verdict bad "SINGLE-STREAM LIMITED"
     bullet "The link sustains ${MULTI_MBPS} Mbps aggregate, but a single stream reaches only ${SINGLE_MBPS} Mbps."
-    bullet "Replication (a single stream) will NEVER use the full link capacity."
+    bullet "Replication (a single TCP stream) will NEVER use the full link capacity until this is fixed."
     if [ "$HIGH_LOSS" = "1" ] || [ "${SINGLE_RETR:-0}" -gt 50 ]; then
-        warn "ROOT CAUSE: LOSS-BOUND (loss ${LOSS}%, retransmits ${SINGLE_RETR})."
-        action "Switch the congestion control algorithm to BBR on the Primary:"
-        bullet "net.core.default_qdisc = fq"
-        bullet "net.ipv4.tcp_congestion_control = bbr"
+        warn "ROOT CAUSE: LOSS-BOUND (packet loss ${LOSS}%, retransmits ${SINGLE_RETR})."
+        recommend_bbr
+        recommend_buffers
+        recommend_apply
     else
-        warn "ROOT CAUSE: LATENCY/WINDOW-BOUND (low loss, retransmits ${SINGLE_RETR})."
-        action "Raise TCP buffers above the BDP (${BDP_MB} MB) on both ends:"
-        bullet "net.core.wmem_max = $((BDP_BYTES * 4))"
-        bullet "net.ipv4.tcp_wmem = 4096 65536 $((BDP_BYTES * 4))"
-        bullet "net.ipv4.tcp_slow_start_after_idle = 0"
+        warn "ROOT CAUSE: LATENCY / WINDOW-BOUND (low loss ${LOSS}%, retransmits ${SINGLE_RETR})."
+        recommend_buffers
+        recommend_apply
     fi
 else
     verdict warn "NOT a single-stream limitation"
-    bullet "Single (${SINGLE_MBPS}) is comparable to parallel (${MULTI_MBPS}). TCP tuning will have little effect."
+    bullet "Single (${SINGLE_MBPS}) is comparable to parallel (${MULTI_MBPS}); OS TCP tuning will barely help."
     bullet "Likely (a): this is the link's true effective capacity -> escalate to the network team."
-    bullet "Likely (b): the bottleneck is NOT the network -> inspect apply/disk on the standby."
+    bullet "Likely (b): the bottleneck is NOT the network -> inspect apply/disk on the standby (pg-repl-diag apply-check)."
 fi
 
 # --- Final verdict: can a single stream keep up with the WAL rate? ---
