@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# bin/repl_apply_diag.sh
+# libexec/pg-repl-diag/apply-check   (invoked as: pg-repl-diag apply-check)
 # -----------------------------------------------------------------------------
-# Counterpart to repl_network_diag.sh — run this ON THE STANDBY.
+# Counterpart to 'pg-repl-diag net-test' — run this ON THE STANDBY.
 #
 # PURPOSE: determine whether lag originates on the APPLY side (standby disk/CPU)
 # or because WAL is genuinely arriving slowly over the network.
@@ -25,16 +25,16 @@
 # Cadence is controlled by APPLY_INTERVAL / APPLY_COUNT.
 #
 # USAGE (on the standby):
-#   bin/repl_apply_diag.sh
-#   APPLY_INTERVAL=5 APPLY_COUNT=24 bin/repl_apply_diag.sh   # override for 2 minutes
+#   pg-repl-diag apply-check
+#   APPLY_INTERVAL=5 APPLY_COUNT=24 pg-repl-diag apply-check   # override for 2 minutes
 # -----------------------------------------------------------------------------
 
 set -u
 
 # Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
-# shellcheck source=../lib/repl_common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+# shellcheck source=../../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 
 # This probe needs its cadence and DB connectivity defined, otherwise abort.
 require APPLY_INTERVAL
@@ -188,13 +188,13 @@ if [ "$GAP_GROWING" = "1" ] || [ "$APPLY_SLOWER" = "1" ]; then
 elif [ "$avg_arr" != "-" ] && python3 -c "exit(0 if float('${avg_arr}')<1.0 else 1)" 2>/dev/null; then
     verdict warn "WAL ARRIVING SLOWLY (low arrival, no apply backlog)."
     bullet "Apply is effectively idle / capable, but little WAL is coming in."
-    action "The bottleneck is likely the NETWORK. Run repl_network_diag.sh from the Primary."
+    action "The bottleneck is likely the NETWORK. Run 'pg-repl-diag net-test' from the Primary."
 else
     verdict good "HEALTHY. Apply keeps up with arrival, the gap is stable, no significant lag."
     note "If users still perceive lag, re-check during PEAK load (batch/checkpoint)."
 fi
 
-subsection "Pair this with repl_network_diag.sh (Primary side) for the full picture"
+subsection "Pair this with 'pg-repl-diag net-test' (Primary side) for the full picture"
 bullet "Network script says single-stream is sufficient BUT this is APPLY-BOUND -> focus on standby DISK/CPU."
 bullet "This script reports low arrival -> go back to the network."
 echo ""

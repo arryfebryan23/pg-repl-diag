@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bin/repl_collect.sh
+# libexec/pg-repl-diag/collect   (invoked as: pg-repl-diag collect)
 # -----------------------------------------------------------------------------
 # Static configuration collector (OS + PostgreSQL) relevant to replication
 # lag diagnosis. STRICTLY READ-ONLY — it modifies nothing on the host or DB.
@@ -12,9 +12,9 @@
 # CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 #
 # USAGE:
-#   bin/repl_collect.sh                          # collect local node only
-#   bin/repl_collect.sh <peer-ip-1> <peer-ip-2>  # also measure RTT to peers
-#                                                # (overrides PEERS from repl.env)
+#   pg-repl-diag collect                          # collect local node only
+#   pg-repl-diag collect <peer-ip-1> <peer-ip-2>  # also measure RTT to peers
+#                                                 # (overrides PEERS from repl.env)
 #
 # Run as the 'postgres' OS user (or root) so configuration files and process
 # level metrics are readable.
@@ -23,8 +23,8 @@
 set -u
 
 # Load central configuration (repl.script.env + repl.env) and validation helpers.
-# shellcheck source=../lib/repl_common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+# shellcheck source=../../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 
 # This collector requires DB connectivity and an output directory.
 require PGDATABASE "PostgreSQL database name"

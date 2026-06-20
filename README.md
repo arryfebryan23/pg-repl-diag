@@ -18,13 +18,16 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 ├── repl.script.env      # SCRIPT/toolkit behaviour: output, logging, cadence, appearance (committed)
 ├── repl.env.example     # ENVIRONMENT template: PostgreSQL/OS/topology (committed)
 ├── repl.env             # your local environment config (git-ignored; copy of the example)
-├── bin/                 # executable scripts run by operators
-│   ├── repl_collect.sh
-│   ├── repl_network_diag.sh
-│   ├── repl_apply_diag.sh
-│   ├── repl_sampler_primary.sh
-│   ├── repl_sampler_standby.sh
-│   └── repl_dashboard.py
+├── bin/                 # single entry point (put this dir on PATH)
+│   └── pg-repl-diag     # dispatcher: routes sub-commands to libexec/
+├── libexec/
+│   └── pg-repl-diag/    # sub-command implementations (not called directly)
+│       ├── collect          # pg-repl-diag collect
+│       ├── net-test         # pg-repl-diag net-test
+│       ├── apply-check      # pg-repl-diag apply-check
+│       ├── sample-primary   # pg-repl-diag sample --role primary
+│       ├── sample-standby   # pg-repl-diag sample --role standby
+│       └── dashboard        # pg-repl-diag dashboard
 ├── lib/                 # shared library
 │   ├── repl_common.sh   # config loader + validation + per-run logging
 │   └── repl_format.sh   # shared console UI (banners, sections, status tags)
@@ -53,14 +56,18 @@ Scripts never embed configuration values.
 
 ## Package Contents
 
-| Script | Run on | Type | Purpose |
-|--------|--------|------|---------|
-| `bin/repl_collect.sh` | every node | **one-time** | Static OS + DB configuration snapshot |
-| `bin/repl_network_diag.sh` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
-| `bin/repl_apply_diag.sh` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
-| `bin/repl_sampler_primary.sh` | Primary | **periodic** | Sample lag & WAL rate → CSV + burst captures |
-| `bin/repl_sampler_standby.sh` | Standby | **periodic** | Sample apply/network/disk/CPU → CSV + burst captures |
-| `bin/repl_dashboard.py` | anywhere | offline | Convert CSV → interactive HTML dashboard |
+Everything is driven through a single command, **`pg-repl-diag`**. Put `bin/` on
+your `PATH` (or call `bin/pg-repl-diag` directly) and run `pg-repl-diag help` for
+the full list.
+
+| Command | Run on | Type | Purpose |
+|---------|--------|------|---------|
+| `pg-repl-diag collect` | every node | **one-time** | Static OS + DB configuration snapshot |
+| `pg-repl-diag net-test` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
+| `pg-repl-diag apply-check` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
+| `pg-repl-diag sample --role primary` | Primary | **periodic** | Sample lag & WAL rate → CSV + burst captures |
+| `pg-repl-diag sample --role standby` | Standby | **periodic** | Sample apply/network/disk/CPU → CSV + burst captures |
+| `pg-repl-diag dashboard` | anywhere | offline | Convert CSV → interactive HTML dashboard |
 
 ---
 
@@ -74,7 +81,7 @@ $EDITOR repl.env          # adjust connection + topology for THIS node
 
 Both files are sourced by bash and use the `VAR="${VAR:-default}"` form, so any
 value already exported in the environment still takes precedence — per-invocation
-overrides keep working, e.g. `INTERVAL=5 bin/repl_sampler_standby.sh`.
+overrides keep working, e.g. `INTERVAL=5 pg-repl-diag sample --role standby`.
 
 **Environment** — site-specific (`repl.env`, from `repl.env.example`):
 
@@ -112,7 +119,7 @@ Color is automatic on a terminal and suppressed when output is redirected or
 > files and process-level metrics are readable.
 
 Operations validate the variables they need and **abort** when one is missing —
-e.g. `repl_network_diag.sh` refuses to run without `TARGET`.
+e.g. `pg-repl-diag net-test` refuses to run without `TARGET`.
 
 ---
 
@@ -156,7 +163,7 @@ silently reported as unavailable.
 | Port | Direction | Used by | Required? |
 |------|-----------|---------|-----------|
 | **5432** (`PGPORT`) | standby → primary | streaming replication **and** every script's `psql` | **Yes** |
-| **5201** (`IPERF_PORT`) | primary → standby | `repl_network_diag.sh` only | Only for the network test |
+| **5201** (`IPERF_PORT`) | primary → standby | `pg-repl-diag net-test` only | Only for the network test |
 | **ICMP** (ping) | primary ↔ standby | RTT / packet-loss baseline in the collector & network test | Recommended |
 
 For the network test, start `iperf3 -s` on the standby (listening on `IPERF_PORT`,
@@ -175,7 +182,7 @@ Present on a standard Linux + PostgreSQL install; listed for completeness:
 | `procps` | `ps`, `sysctl`, `free` | process lookup, TCP sysctls, memory |
 | `iproute2` | `ss`, `ip` | replication-socket RTT/retransmits, addressing |
 
-**Required only for `repl_network_diag.sh`:**
+**Required only for `pg-repl-diag net-test`:**
 
 | Package | Provides | Note |
 |---------|----------|------|
@@ -214,13 +221,15 @@ sudo apt-get install -y sysstat iperf3 ethtool chrony
 
 ## Workflow
 
+> Make the dispatcher executable once: `chmod +x bin/pg-repl-diag`. Put `bin/` on
+> your `PATH` to drop the `bin/` prefix below, or call `bin/pg-repl-diag …` directly.
+
 ### 1) Static snapshot (once, on each node)
 ```bash
-chmod +x bin/repl_collect.sh
 # On the Primary, also measure RTT to both standbys:
-bin/repl_collect.sh <standby-1-ip> <standby-2-ip>
+pg-repl-diag collect <standby-1-ip> <standby-2-ip>
 # On the remote standby:
-bin/repl_collect.sh <primary-ip>
+pg-repl-diag collect <primary-ip>
 ```
 Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 
@@ -228,14 +237,12 @@ Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 
 **On the Primary:**
 ```bash
-chmod +x bin/repl_sampler_primary.sh
-nohup bin/repl_sampler_primary.sh >/dev/null 2>&1 &   # console log -> output/log/
+nohup pg-repl-diag sample --role primary >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 **On the remote standby:**
 ```bash
-chmod +x bin/repl_sampler_standby.sh
-nohup bin/repl_sampler_standby.sh >/dev/null 2>&1 &   # console log -> output/log/
+nohup pg-repl-diag sample --role standby >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 Raw output:
@@ -244,19 +251,18 @@ Raw output:
 
 ### 3) On-demand deep dives
 ```bash
-bin/repl_network_diag.sh <standby-ip>   # on the Primary (start 'iperf3 -s' on the standby first)
-bin/repl_apply_diag.sh                  # on the standby
+pg-repl-diag net-test <standby-ip>   # on the Primary (start 'iperf3 -s' on the standby first)
+pg-repl-diag apply-check             # on the standby
 ```
 
 ### 4) Generate the dashboard
 Collect the CSVs from each node into `output/metrics/`, then:
 ```bash
-# load the output paths (from repl.script.env), then render:
-set -a; . ./repl.script.env; . ./repl.env; set +a
-python3 bin/repl_dashboard.py
-# or explicitly:
-python3 bin/repl_dashboard.py --metrics-dir ./output/metrics --burst-dir ./output/bursts \
-                              --out ./output/dashboards/dashboard.html
+# the dispatcher loads the output paths from the config for you:
+pg-repl-diag dashboard
+# or point at explicit paths:
+pg-repl-diag dashboard --metrics-dir ./output/metrics --burst-dir ./output/bursts \
+                       --out ./output/dashboards/dashboard.html
 ```
 Open the generated `output/dashboards/dashboard.html` in a browser (local file, no internet required).
 
@@ -274,7 +280,7 @@ After=postgresql.service
 User=postgres
 WorkingDirectory=/opt/repl-diag
 Environment=REPL_ENV_FILE=/opt/repl-diag/repl.env
-ExecStart=/opt/repl-diag/bin/repl_sampler_standby.sh   ; use _primary on the primary node
+ExecStart=/opt/repl-diag/bin/pg-repl-diag sample --role standby   ; use --role primary on the primary node
 Restart=always
 
 [Install]
@@ -311,8 +317,8 @@ High lag?
     └─ high rtt, retransmits ~0       → latency-bound → raise TCP buffers above the BDP
 ```
 
-To prove **NETWORK-BOUND** vs link capacity, run `bin/repl_network_diag.sh`
-(single-stream vs parallel test). For apply-side detail, run `bin/repl_apply_diag.sh`.
+To prove **NETWORK-BOUND** vs link capacity, run `pg-repl-diag net-test`
+(single-stream vs parallel test). For apply-side detail, run `pg-repl-diag apply-check`.
 
 ---
 

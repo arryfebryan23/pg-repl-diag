@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# bin/repl_sampler_primary.sh  —  run ON THE PRIMARY (background / systemd)
+# libexec/pg-repl-diag/sample-primary  —  run ON THE PRIMARY (background / systemd)
+# Invoked as: pg-repl-diag sample --role primary
 # -----------------------------------------------------------------------------
 # Periodically samples primary-side replication metrics into a RAW CSV under
 # METRICS_DIR. When any standby's replay_lag exceeds the threshold, it performs
@@ -13,17 +14,17 @@
 # CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 #
 # USAGE:
-#   bin/repl_sampler_primary.sh
-#   nohup bin/repl_sampler_primary.sh >/dev/null 2>&1 &
+#   pg-repl-diag sample --role primary
+#   nohup pg-repl-diag sample --role primary >/dev/null 2>&1 &
 #
 # Console output is mirrored automatically to a log file inside the project
-# (LOG_DIR, default output/log/repl_sampler_primary.log) — no /var/log needed.
+# (LOG_DIR, default output/log/sample-primary.log) — no /var/log needed.
 # -----------------------------------------------------------------------------
 set -u
 
 # Load central configuration (repl.script.env + repl.env) and validation helpers.
-# shellcheck source=../lib/repl_common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+# shellcheck source=../../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 
 # Abort if any required tunable or output directory is missing.
 require INTERVAL

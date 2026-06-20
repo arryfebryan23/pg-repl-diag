@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bin/repl_network_diag.sh
+# libexec/pg-repl-diag/net-test   (invoked as: pg-repl-diag net-test)
 # -----------------------------------------------------------------------------
 # Determines whether replication lag to a standby is caused by a SINGLE TCP
 # STREAM limitation (latency/loss) or by genuine link bandwidth constraints.
@@ -18,7 +18,7 @@
 #   1. On the RECEIVING standby (the WAL receiver), start an iperf3 server:
 #          iperf3 -s
 #   2. On the PRIMARY (the WAL sender), run this script:
-#          bin/repl_network_diag.sh [standby-ip]   # arg overrides TARGET in repl.env
+#          pg-repl-diag net-test [standby-ip]   # arg overrides TARGET in repl.env
 #
 #   Test direction = Primary -> Standby, matching the direction of WAL flow.
 # -----------------------------------------------------------------------------
@@ -27,8 +27,8 @@ set -u
 
 # Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
-# shellcheck source=../lib/repl_common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
+# shellcheck source=../../lib/repl_common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 
 # A CLI argument overrides the TARGET defined in repl.env.
 TARGET="${1:-${TARGET:-}}"
