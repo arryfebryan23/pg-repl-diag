@@ -40,18 +40,22 @@ PSQL="psql -d ${PGDB} -X -At -q -F|"
 CSV="${METRICS_DIR}/primary_metrics.csv"
 ensure_dir "$METRICS_DIR" "$BURST_DIR"
 
-command -v psql >/dev/null 2>&1 || { echo "ERROR: psql not found"; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
+command -v psql >/dev/null 2>&1 || die "psql not found"
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
 
-IN_REC="$($PSQL -c 'SELECT pg_is_in_recovery();' 2>/dev/null)" || { echo "ERROR: failed to connect via psql (check PGHOST/.pgpass)"; exit 1; }
-[ "$IN_REC" = "f" ] || { echo "ERROR: this is NOT the PRIMARY (in_recovery=$IN_REC). Use the standby script."; exit 1; }
+IN_REC="$($PSQL -c 'SELECT pg_is_in_recovery();' 2>/dev/null)" || die "failed to connect via psql (check PGHOST/.pgpass)"
+[ "$IN_REC" = "f" ] || die "this is NOT the PRIMARY (in_recovery=$IN_REC). Use the standby script."
 
 HEADER="ts_epoch,ts_human,wal_lsn_bytes,wal_rate_mbps,standby,client_addr,state,sync_state,write_lag_s,flush_lag_s,replay_lag_s,total_lag_bytes"
 [ -f "$CSV" ] || echo "$HEADER" > "$CSV"
 
-trap 'echo "[stop] primary sampler stopped."; exit 0' INT TERM
+trap 'log_info "primary sampler stopped."; exit 0' INT TERM
 
-echo "[start] PRIMARY sampler -> $CSV (interval ${INTERVAL}s, lag threshold ${THRESHOLD_LAG_S}s)"
+run_header "PRIMARY SAMPLER"
+kv "CSV output"     "$CSV"
+kv "Interval"       "${INTERVAL}s"
+kv "Lag threshold"  "${THRESHOLD_LAG_S}s"
+log_ok "primary sampler started"
 
 prev_lsn=""; prev_ts=""; last_burst=0; iter=0
 while :; do
@@ -59,7 +63,7 @@ while :; do
     EPOCH="$(date +%s)"; HUMAN="$(date '+%Y-%m-%d %H:%M:%S')"
 
     LSN="$($PSQL -c "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(),'0/0')::bigint;" 2>/dev/null)"
-    [ -z "${LSN:-}" ] && { echo "[warn] LSN query failed"; sleep "$INTERVAL"; continue; }
+    [ -z "${LSN:-}" ] && { log_warn "LSN query failed"; sleep "$INTERVAL"; continue; }
 
     RATE="-"
     if [ -n "$prev_lsn" ] && [ "$EPOCH" -gt "${prev_ts:-0}" ]; then
@@ -105,9 +109,9 @@ while :; do
             psql -d "$PGDB" -X -c "SELECT pid,state,wait_event_type,wait_event,backend_type FROM pg_stat_activity WHERE backend_type LIKE '%walsender%';" 2>&1
             echo "--- iostat ---"; command -v iostat >/dev/null && iostat -dxy 1 3 2>&1
         } > "$BF"
-        echo "[BURST] incident captured -> $BF"
+        log_evt "burst captured -> $BF"
     fi
 
-    [ "$COUNT" -gt 0 ] && [ "$iter" -ge "$COUNT" ] && { echo "[done] $COUNT samples complete."; break; }
+    [ "$COUNT" -gt 0 ] && [ "$iter" -ge "$COUNT" ] && { log_ok "$COUNT samples complete."; break; }
     sleep "$INTERVAL"
 done

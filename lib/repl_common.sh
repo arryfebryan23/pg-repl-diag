@@ -32,12 +32,21 @@ set -a
 . "$REPL_ENV_FILE"
 set +a
 
+# Shared presentation layer (colors, banners, sections, status tags, verdict
+# blocks, timestamped logging). Sourcing it here gives EVERY script the same
+# console look & feel. It is loaded BEFORE start_logging so that color is decided
+# against the real terminal, not the tee pipe.
+# shellcheck source=./repl_format.sh
+if [ -f "${__REPL_LIB_DIR}/repl_format.sh" ]; then
+    . "${__REPL_LIB_DIR}/repl_format.sh"
+fi
+
 # require VAR ["description"] — abort the operation if VAR is empty or unset.
 require() {
     local name="$1" desc="${2:-}"
     if [ -z "${!name:-}" ]; then
-        echo "ERROR: required variable '$name' is not set${desc:+ — $desc}." >&2
-        echo "       Set it in '$REPL_ENV_FILE' (or export it) and re-run. Operation aborted." >&2
+        fail "required variable '$name' is not set${desc:+ — $desc}." >&2
+        note "Set it in '$REPL_ENV_FILE' (or export it) and re-run. Operation aborted." >&2
         exit 1
     fi
 }

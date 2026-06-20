@@ -25,7 +25,8 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 │   ├── repl_sampler_standby.sh
 │   └── repl_dashboard.py
 ├── lib/                 # shared library
-│   └── repl_common.sh   # config loader + validation helpers
+│   ├── repl_common.sh   # config loader + validation + per-run logging
+│   └── repl_format.sh   # shared console UI (banners, sections, status tags)
 └── output/              # all runtime artifacts (git-ignored, created on demand)
     ├── metrics/         # sampler CSV files
     ├── reports/         # static collector reports
@@ -80,6 +81,14 @@ Key settings (full list in `repl.env.example`):
 | `TARGET` | *(empty, required)* | standby IP for the network test (`iperf3 -s`) |
 | `IPERF_PORT` / `DURATION` / `PARALLEL` / `LINK_MBPS` / `WAL_SAMPLE` | 5201 / 20 / 8 / 1000 / 15 | network test parameters |
 | `PEERS` | *(empty, optional)* | space-separated peer IPs for RTT in the collector |
+| `REPL_TOOLKIT_NAME` / `REPL_TOOLKIT_VERSION` | toolkit name / `1.0` | shown in the console banner of every script |
+| `REPL_WIDTH` | 74 | banner / rule width in columns |
+| `REPL_COLOR` | `auto` | `auto` (color only on a terminal) / `always` / `never` |
+
+All scripts share **one console look & feel** via `lib/repl_format.sh` (banners,
+sections, `[INFO]`/`[ OK ]`/`[WARN]`/`[FAIL]` status tags, and `VERDICT` blocks).
+Color is automatic on a terminal and suppressed when output is redirected or
+`NO_COLOR` is set, so log files stay clean.
 
 > Do **not** store the database password in `repl.env` — use `~/.pgpass`
 > (`chmod 600`). Ideally run the scripts as the **`postgres`** user so config

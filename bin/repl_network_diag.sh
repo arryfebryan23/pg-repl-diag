@@ -25,7 +25,8 @@
 
 set -u
 
-# Load central configuration (repl.env) and validation helpers.
+# Load central configuration (repl.env), validation helpers, and the shared
+# presentation layer (run_header/section/kv/verdict/...).
 # shellcheck source=../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
 
@@ -42,14 +43,6 @@ require WAL_SAMPLE
 require PGDATABASE
 
 PGDB="$PGDATABASE"
-
-red()   { printf '\033[31m%s\033[0m\n' "$*"; }
-grn()   { printf '\033[32m%s\033[0m\n' "$*"; }
-ylw()   { printf '\033[33m%s\033[0m\n' "$*"; }
-bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
-line()  { printf '%s\n' "------------------------------------------------------------"; }
-
-die()   { red "ERROR: $*"; exit 1; }
 
 command -v iperf3 >/dev/null 2>&1 || die "iperf3 is not installed. Install with: yum/apt install iperf3"
 command -v python3 >/dev/null 2>&1 || die "python3 is required to parse results"
@@ -73,63 +66,57 @@ except Exception:
 '
 }
 
-bold ""
-bold "==================================================================="
-bold "   NETWORK DIAGNOSIS: SINGLE-STREAM vs PARALLEL  ->  $TARGET"
-bold "==================================================================="
-echo "Duration/test : ${DURATION}s | Parallel streams: ${PARALLEL} | Port: ${IPERF_PORT}"
-line
+run_header "NETWORK DIAGNOSIS — SINGLE-STREAM vs PARALLEL  ->  $TARGET"
+kv "Duration / test"   "${DURATION}s"
+kv "Parallel streams"  "${PARALLEL}"
+kv "iperf3 port"       "${IPERF_PORT}"
 
 # ---------------------------------------------------------------------------
 # PHASE 1 — Baseline: RTT & packet loss
 # ---------------------------------------------------------------------------
-bold "[PHASE 1] RTT & packet loss (ping, 100 packets)"
+section "[PHASE 1] RTT & packet loss (ping, 100 packets)"
 PING_OUT="$(ping -c 100 -i 0.2 -q "$TARGET" 2>/dev/null)"
 echo "$PING_OUT" | grep -E 'packet loss|rtt|round-trip'
 LOSS="$(echo "$PING_OUT" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')"
 RTT_AVG="$(echo "$PING_OUT" | awk -F'/' '/rtt|round-trip/ {print $5}')"
 LOSS="${LOSS:-0}"
 RTT_AVG="${RTT_AVG:-0}"
-echo "  -> Average RTT  : ${RTT_AVG} ms"
-echo "  -> Packet loss  : ${LOSS} %"
-line
+kv "Average RTT"  "${RTT_AVG} ms"
+kv "Packet loss"  "${LOSS} %"
 
 # ---------------------------------------------------------------------------
 # PHASE 2 — Current TCP configuration
 # ---------------------------------------------------------------------------
-bold "[PHASE 2] TCP configuration on this host (Primary / sender)"
-echo "  congestion_control : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-echo "  available          : $(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)"
-echo "  tcp_wmem           : $(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
-echo "  tcp_rmem           : $(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
-echo "  wmem_max           : $(sysctl -n net.core.wmem_max 2>/dev/null)"
-echo "  window_scaling     : $(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
-echo "  slow_start_idle    : $(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
-line
+section "[PHASE 2] TCP configuration on this host (Primary / sender)"
+kv "congestion_control" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+kv "available"          "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)"
+kv "tcp_wmem"           "$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
+kv "tcp_rmem"           "$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
+kv "wmem_max"           "$(sysctl -n net.core.wmem_max 2>/dev/null)"
+kv "window_scaling"     "$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
+kv "slow_start_idle"    "$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # PHASE 3 — SINGLE-STREAM test (mirrors replication)
 # ---------------------------------------------------------------------------
-bold "[PHASE 3] iperf3 SINGLE stream  (= streaming replication behaviour)"
+section "[PHASE 3] iperf3 SINGLE stream  (= streaming replication behaviour)"
 read -r SINGLE_MBPS SINGLE_RETR <<< "$(run_iperf 1)"
 [ "$SINGLE_MBPS" = "ERR" ] && die "iperf3 failed. Ensure 'iperf3 -s' is running on $TARGET and port $IPERF_PORT is open."
-echo "  -> Single-stream throughput : ${SINGLE_MBPS} Mbps"
-echo "  -> Retransmits              : ${SINGLE_RETR}"
-line
+kv "Single-stream throughput" "${SINGLE_MBPS} Mbps"
+kv "Retransmits"              "${SINGLE_RETR}"
 
 # ---------------------------------------------------------------------------
 # PHASE 4 — PARALLEL test (true link capacity)
 # ---------------------------------------------------------------------------
-bold "[PHASE 4] iperf3 PARALLEL ${PARALLEL} streams  (= actual link capacity)"
+section "[PHASE 4] iperf3 PARALLEL ${PARALLEL} streams  (= actual link capacity)"
 read -r MULTI_MBPS MULTI_RETR <<< "$(run_iperf "$PARALLEL")"
-echo "  -> ${PARALLEL}-stream throughput : ${MULTI_MBPS} Mbps"
-echo "  -> Retransmits           : ${MULTI_RETR}"
-line
+kv "${PARALLEL}-stream throughput" "${MULTI_MBPS} Mbps"
+kv "Retransmits"                  "${MULTI_RETR}"
 
 # ---------------------------------------------------------------------------
 # PHASE 5 — WAL generation rate on the Primary
 # ---------------------------------------------------------------------------
-bold "[PHASE 5] WAL generation rate on the Primary (sampling ${WAL_SAMPLE}s)"
+section "[PHASE 5] WAL generation rate on the Primary (sampling ${WAL_SAMPLE}s)"
 WAL_MB_S="-"; WAL_MBPS="-"
 if command -v psql >/dev/null 2>&1; then
     PSQL="psql -d ${PGDB} -At -X -q"
@@ -143,26 +130,25 @@ if command -v psql >/dev/null 2>&1; then
             WAL_MB_S="$(python3 -c "print(f'{${WAL_BYTES}/${WAL_SAMPLE}/1048576:.1f}')")"
             # convert to Mbps (bits/s) so it is directly comparable to iperf3 output
             WAL_MBPS="$(python3 -c "print(f'{${WAL_BYTES}*8/${WAL_SAMPLE}/1e6:.1f}')")"
-            echo "  -> WAL generated : ${WAL_BYTES} bytes over ${WAL_SAMPLE}s"
-            echo "  -> WAL rate      : ${WAL_MB_S} MB/s  (= ${WAL_MBPS} Mbps)"
-            ylw "  NOTE: this is the average over the sampling window. Re-run during PEAK"
-            ylw "        load / batch jobs to capture the PEAK rate, which drives lag."
+            kv "WAL generated" "${WAL_BYTES} bytes over ${WAL_SAMPLE}s"
+            kv "WAL rate"      "${WAL_MB_S} MB/s  (= ${WAL_MBPS} Mbps)"
+            note "This is the average over the sampling window. Re-run during PEAK"
+            note "load / batch jobs to capture the PEAK rate, which drives lag."
         else
-            ylw "  Could not compute the WAL delta. Skipping."
+            warn "Could not compute the WAL delta. Skipping."
         fi
     else
-        ylw "  This host is not the Primary (it is in recovery). Run this phase ON THE PRIMARY."
+        warn "This host is not the Primary (it is in recovery). Run this phase ON THE PRIMARY."
     fi
 else
-    ylw "  psql not found -> WAL phase skipped."
-    ylw "  Set PGHOST/PGUSER/PGDATABASE, or run this script on the Primary host."
+    warn "psql not found -> WAL phase skipped."
+    note "Set PGHOST/PGUSER/PGDATABASE, or run this script on the Primary host."
 fi
-line
 
 # ---------------------------------------------------------------------------
 # PHASE 6 — Analysis & verdict
 # ---------------------------------------------------------------------------
-bold "[PHASE 6] ANALYSIS"
+section "[PHASE 6] ANALYSIS"
 
 # Bandwidth-Delay Product (the ideal TCP window)
 BDP_BYTES="$(python3 -c "print(int(${LINK_MBPS}*1e6/8 * ${RTT_AVG}/1000))" 2>/dev/null)"
@@ -174,64 +160,60 @@ s=${SINGLE_MBPS:-0}; m=${MULTI_MBPS:-0}
 print(f'{(m/s):.1f}' if s>0 else '0')
 " 2>/dev/null)"
 
-echo "  Ideal BDP (minimum window) : ${BDP_MB} MB  (link ${LINK_MBPS}Mbps x RTT ${RTT_AVG}ms)"
-echo "  Parallel / single ratio    : ${RATIO}x"
-echo ""
+kv "Ideal BDP (min window)" "${BDP_MB} MB  (link ${LINK_MBPS}Mbps x RTT ${RTT_AVG}ms)"
+kv "Parallel / single"      "${RATIO}x"
 
 # Verdict logic
 HIGH_LOSS="$(python3 -c "print(1 if float(${LOSS})>0.1 else 0)")"
 SINGLE_BOUND="$(python3 -c "print(1 if float('${RATIO}')>=2.0 else 0)")"
 
 if [ "$SINGLE_BOUND" = "1" ]; then
-    red   ">> VERDICT: SINGLE-STREAM LIMITED."
-    echo  "   The link sustains ${MULTI_MBPS} Mbps aggregate, but a single stream reaches only ${SINGLE_MBPS} Mbps."
-    echo  "   Replication (a single stream) will NEVER use the full link capacity."
-    echo  ""
+    verdict bad "SINGLE-STREAM LIMITED"
+    bullet "The link sustains ${MULTI_MBPS} Mbps aggregate, but a single stream reaches only ${SINGLE_MBPS} Mbps."
+    bullet "Replication (a single stream) will NEVER use the full link capacity."
     if [ "$HIGH_LOSS" = "1" ] || [ "${SINGLE_RETR:-0}" -gt 50 ]; then
-        ylw "   ROOT CAUSE: LOSS-BOUND (loss ${LOSS}%, retransmits ${SINGLE_RETR})."
-        grn "   PRIMARY ACTION: switch the congestion control algorithm to BBR on the Primary."
-        echo "        net.core.default_qdisc = fq"
-        echo "        net.ipv4.tcp_congestion_control = bbr"
+        warn "ROOT CAUSE: LOSS-BOUND (loss ${LOSS}%, retransmits ${SINGLE_RETR})."
+        action "Switch the congestion control algorithm to BBR on the Primary:"
+        bullet "net.core.default_qdisc = fq"
+        bullet "net.ipv4.tcp_congestion_control = bbr"
     else
-        ylw "   ROOT CAUSE: LATENCY/WINDOW-BOUND (low loss, retransmits ${SINGLE_RETR})."
-        grn "   PRIMARY ACTION: raise TCP buffers above the BDP (${BDP_MB} MB) on both ends."
-        echo "        net.core.wmem_max = $((BDP_BYTES * 4))"
-        echo "        net.ipv4.tcp_wmem = 4096 65536 $((BDP_BYTES * 4))"
-        echo "        net.ipv4.tcp_slow_start_after_idle = 0"
+        warn "ROOT CAUSE: LATENCY/WINDOW-BOUND (low loss, retransmits ${SINGLE_RETR})."
+        action "Raise TCP buffers above the BDP (${BDP_MB} MB) on both ends:"
+        bullet "net.core.wmem_max = $((BDP_BYTES * 4))"
+        bullet "net.ipv4.tcp_wmem = 4096 65536 $((BDP_BYTES * 4))"
+        bullet "net.ipv4.tcp_slow_start_after_idle = 0"
     fi
 else
-    ylw  ">> VERDICT: NOT a single-stream limitation."
-    echo "   Single (${SINGLE_MBPS}) is comparable to parallel (${MULTI_MBPS}). TCP tuning will have little effect."
-    echo "   Likely: (a) this is the link's true effective capacity -> escalate to the network team,"
-    echo "           (b) the bottleneck is NOT the network -> inspect apply/disk on the standby."
+    verdict warn "NOT a single-stream limitation"
+    bullet "Single (${SINGLE_MBPS}) is comparable to parallel (${MULTI_MBPS}). TCP tuning will have little effect."
+    bullet "Likely (a): this is the link's true effective capacity -> escalate to the network team."
+    bullet "Likely (b): the bottleneck is NOT the network -> inspect apply/disk on the standby."
 fi
-line
 
 # --- Final verdict: can a single stream keep up with the WAL rate? ---
-bold "[FINAL VERDICT] Single-stream capacity vs WAL demand"
+section "[FINAL VERDICT] Single-stream capacity vs WAL demand"
 if [ "$WAL_MBPS" != "-" ]; then
-    echo "  Single-stream available : ${SINGLE_MBPS} Mbps"
-    echo "  WAL demand (sampled)    : ${WAL_MBPS} Mbps  (${WAL_MB_S} MB/s)"
+    kv "Single-stream available" "${SINGLE_MBPS} Mbps"
+    kv "WAL demand (sampled)"    "${WAL_MBPS} Mbps  (${WAL_MB_S} MB/s)"
     HEADROOM="$(python3 -c "
 single=${SINGLE_MBPS:-0}; wal=${WAL_MBPS:-0}
 print(f'{(single/wal):.1f}' if wal>0 else '999')
 " 2>/dev/null)"
-    echo "  Headroom (single/WAL)   : ${HEADROOM}x"
-    echo ""
+    kv "Headroom (single/WAL)"   "${HEADROOM}x"
     CAN_KEEP="$(python3 -c "print(1 if float('${HEADROOM}')>=1.5 else 0)")"
     if [ "$CAN_KEEP" = "1" ]; then
-        grn ">> Single-stream CAN keep up with the WAL rate (headroom ${HEADROOM}x)."
-        ylw "   If lag persists, the NETWORK is NOT the root cause. Inspect APPLY/DISK on the standby"
-        ylw "   (the flush_lsn vs replay_lsn gap in pg_stat_replication)."
-        ylw "   Caveat: this is an averaged sample. Re-check during peak WAL (batch/checkpoint)."
+        verdict good "Single-stream CAN keep up with the WAL rate (headroom ${HEADROOM}x)"
+        note "If lag persists, the NETWORK is NOT the root cause. Inspect APPLY/DISK on the standby"
+        note "(the flush_lsn vs replay_lsn gap in pg_stat_replication)."
+        note "Caveat: this is an averaged sample. Re-check during peak WAL (batch/checkpoint)."
     else
-        red ">> Single-stream CANNOT keep up with the WAL rate (headroom only ${HEADROOM}x)."
-        grn "   The NETWORK is a genuine bottleneck. Apply the actions from [PHASE 6] above,"
-        grn "   then re-run this script to verify the headroom has improved."
+        verdict bad "Single-stream CANNOT keep up with the WAL rate (headroom only ${HEADROOM}x)"
+        action "The NETWORK is a genuine bottleneck. Apply the actions from [PHASE 6] above,"
+        action "then re-run this script to verify the headroom has improved."
     fi
 else
-    ylw ">> WAL rate not measured. Re-run ON THE PRIMARY with psql access,"
-    ylw "   ideally during peak hours, and compare against single-stream ${SINGLE_MBPS} Mbps."
+    verdict warn "WAL rate not measured"
+    note "Re-run ON THE PRIMARY with psql access, ideally during peak hours,"
+    note "and compare against single-stream ${SINGLE_MBPS} Mbps."
 fi
-line
 echo ""

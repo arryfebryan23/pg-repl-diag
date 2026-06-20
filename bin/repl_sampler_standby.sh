@@ -41,17 +41,17 @@ CSV="${METRICS_DIR}/standby_metrics.csv"
 ensure_dir "$METRICS_DIR" "$BURST_DIR"
 CLK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
 
-command -v psql >/dev/null 2>&1 || { echo "ERROR: psql not found"; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
+command -v psql >/dev/null 2>&1 || die "psql not found"
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
 HAS_IOSTAT=1; command -v iostat >/dev/null 2>&1 || HAS_IOSTAT=0
 
-IN_REC="$($PSQL -c 'SELECT pg_is_in_recovery();' 2>/dev/null)" || { echo "ERROR: failed to connect via psql"; exit 1; }
-[ "$IN_REC" = "t" ] || { echo "ERROR: this is NOT a STANDBY (in_recovery=$IN_REC)."; exit 1; }
+IN_REC="$($PSQL -c 'SELECT pg_is_in_recovery();' 2>/dev/null)" || die "failed to connect via psql"
+[ "$IN_REC" = "t" ] || die "this is NOT a STANDBY (in_recovery=$IN_REC)."
 
 HEADER="ts_epoch,ts_human,receive_lsn_bytes,replay_lsn_bytes,apply_gap_bytes,arrival_mbps,apply_mbps,time_lag_s,wait_event,disk_util,disk_dev,disk_await,sock_rtt_ms,sock_retrans,cpu_startup_pct"
 [ -f "$CSV" ] || echo "$HEADER" > "$CSV"
 
-trap 'echo "[stop] standby sampler stopped."; exit 0' INT TERM
+trap 'log_info "standby sampler stopped."; exit 0' INT TERM
 
 # Highest %util + device + await from a 1-second iostat sample
 iostat_peak() {
@@ -70,7 +70,11 @@ sock_info() {
     echo "${rtt:--} ${retr:--}"
 }
 
-echo "[start] STANDBY sampler -> $CSV (interval ${INTERVAL}s, lag threshold ${THRESHOLD_LAG_S}s)"
+run_header "STANDBY SAMPLER"
+kv "CSV output"     "$CSV"
+kv "Interval"       "${INTERVAL}s"
+kv "Lag threshold"  "${THRESHOLD_LAG_S}s"
+log_ok "standby sampler started"
 
 prev_recv=""; prev_replay=""; prev_ts=""; prev_pid=""; prev_ticks=""; last_burst=0; iter=0
 while :; do
@@ -87,7 +91,7 @@ while :; do
     replay="$(echo "$ROW" | cut -d'|' -f2)"
     tlag="$(echo "$ROW"   | cut -d'|' -f3)"
     wait_ev="$(echo "$ROW"| cut -d'|' -f4 | tr ',' ';')"
-    [ -z "${recv:-}" ] && { echo "[warn] query failed"; sleep "$INTERVAL"; continue; }
+    [ -z "${recv:-}" ] && { log_warn "query failed"; sleep "$INTERVAL"; continue; }
 
     gap=$(( recv - replay ))
     arr="-"; app="-"
@@ -128,9 +132,9 @@ while :; do
             echo "--- per-core CPU ---"; command -v mpstat >/dev/null && mpstat -P ALL 1 3 2>&1
             echo "--- replication socket ---"; ss -tinp '( dport = :5432 or sport = :5432 )' 2>&1 | sed -E 's/(password=)[^ ]*/\1***/Ig'
         } > "$BF"
-        echo "[BURST] incident captured -> $BF"
+        log_evt "burst captured -> $BF"
     fi
 
-    [ "$COUNT" -gt 0 ] && [ "$iter" -ge "$COUNT" ] && { echo "[done] $COUNT samples complete."; break; }
+    [ "$COUNT" -gt 0 ] && [ "$iter" -ge "$COUNT" ] && { log_ok "$COUNT samples complete."; break; }
     sleep "$INTERVAL"
 done

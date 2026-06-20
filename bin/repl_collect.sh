@@ -51,7 +51,7 @@ have(){ command -v "$1" >/dev/null 2>&1; }
 redact(){ sed -E 's/(password[[:space:]]*=[[:space:]]*)[^[:space:]"'"'"']+/\1***REDACTED***/Ig'; }
 
 exec 3>&1                                       # fd3 = terminal, used for progress
-prog(){ echo ">>> $*" >&3; }
+prog(){ step "$*" >&3; }                        # progress on the terminal (shared style)
 sec(){ printf '\n========================================================================\n== %s\n========================================================================\n' "$*"; prog "$*"; }
 sub(){ printf '\n--- %s ---\n' "$*"; }
 run(){ # run "description" cmd...
@@ -234,9 +234,9 @@ printf '\n======================== END OF REPORT ========================\n'
 }
 
 # ============================================================================
-prog "Collecting diagnostics into: $OUT"
+run_header "STATIC CONFIGURATION COLLECTOR"
+step "Collecting diagnostics into: $OUT"
 collect > "$OUT" 2>&1
-prog "Done. Report file: $OUT"
-echo ""
-echo "Submit the report '$OUT' for analysis."
-echo "Run this same script on ALL nodes so the outputs can be compared."
+ok "Report written: $OUT"
+note "Submit the report '$OUT' for analysis."
+note "Run this same script on ALL nodes so the outputs can be compared."
