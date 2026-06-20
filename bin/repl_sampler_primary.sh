@@ -14,7 +14,10 @@
 #
 # USAGE:
 #   bin/repl_sampler_primary.sh
-#   nohup bin/repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
+#   nohup bin/repl_sampler_primary.sh >/dev/null 2>&1 &
+#
+# Console output is mirrored automatically to a log file inside the project
+# (LOG_DIR, default output/log/repl_sampler_primary.log) — no /var/log needed.
 # -----------------------------------------------------------------------------
 set -u
 

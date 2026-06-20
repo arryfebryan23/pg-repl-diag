@@ -30,7 +30,8 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
     ├── metrics/         # sampler CSV files
     ├── reports/         # static collector reports
     ├── bursts/          # incident burst captures
-    └── dashboards/      # generated HTML dashboards
+    ├── dashboards/      # generated HTML dashboards
+    └── log/             # per-run console logs (stdout+stderr of each command)
 ```
 
 All tunables live in **one** place — `repl.env`. Scripts never embed
@@ -70,6 +71,7 @@ Key settings (full list in `repl.env.example`):
 | `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` | libpq defaults | PostgreSQL connection |
 | `OUTPUT_DIR` | `./output` | root for all generated artifacts |
 | `METRICS_DIR` / `REPORTS_DIR` / `BURST_DIR` / `DASHBOARD_DIR` | under `OUTPUT_DIR` | per-type output folders |
+| `LOG_DIR` | `$OUTPUT_DIR/log` | per-run console logs (every command mirrors stdout+stderr here; set `REPL_NO_LOG=1` to disable) |
 | `INTERVAL` | 10 | seconds between sampler samples |
 | `THRESHOLD_LAG_S` | 30 | lag threshold (s) that triggers a burst capture |
 | `BURST_COOLDOWN` | 120 | minimum gap between bursts (s) |
@@ -116,13 +118,13 @@ Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 **On the Primary:**
 ```bash
 chmod +x bin/repl_sampler_primary.sh
-nohup bin/repl_sampler_primary.sh >/var/log/repl_sampler.log 2>&1 &
+nohup bin/repl_sampler_primary.sh >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 **On the remote standby:**
 ```bash
 chmod +x bin/repl_sampler_standby.sh
-nohup bin/repl_sampler_standby.sh >/var/log/repl_sampler.log 2>&1 &
+nohup bin/repl_sampler_standby.sh >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 Raw output:

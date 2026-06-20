@@ -53,3 +53,42 @@ ensure_dir() {
     local d
     for d in "$@"; do mkdir -p "$d"; done
 }
+
+# -----------------------------------------------------------------------------
+# Per-run logging
+# -----------------------------------------------------------------------------
+# Every command's console output (stdout + stderr) is mirrored to a log file
+# INSIDE the project (LOG_DIR), instead of a system path such as /var/log that
+# is frequently not writable by the running user (permission denied). The log is
+# appended per script — restart-safe — with a banner separating each run. Output
+# still appears on the terminal (via tee), so interactive runs are unchanged.
+#
+# Override the location with LOG_DIR, or disable entirely with REPL_NO_LOG=1.
+LOG_DIR="${LOG_DIR:-${OUTPUT_DIR:-${__REPL_ROOT}/output}/log}"
+
+start_logging() {
+    # Run only once, and honour the opt-out switch.
+    [ -n "${__REPL_LOGGING:-}" ] && return 0
+    [ -n "${REPL_NO_LOG:-}" ]    && return 0
+
+    local base
+    base="$(basename "${0:-toolkit}" .sh)"
+
+    # If the log directory cannot be created (e.g. read-only mount), skip logging
+    # silently rather than aborting the diagnostic run.
+    mkdir -p "$LOG_DIR" 2>/dev/null || return 0
+
+    REPL_LOG_FILE="${LOG_DIR}/${base}.log"
+    __REPL_LOGGING=1
+
+    {
+        echo ""
+        echo "===== $(date '+%Y-%m-%d %H:%M:%S') | start ${base} (pid $$) ====="
+    } >> "$REPL_LOG_FILE" 2>/dev/null
+
+    # Mirror everything from here on to the log file and the terminal.
+    exec > >(tee -a "$REPL_LOG_FILE") 2>&1
+}
+
+# Enable logging automatically for every script that sources this file.
+start_logging
