@@ -124,6 +124,12 @@ docker compose down -v       # also wipe the cluster (forces a fresh clone next 
 - **`permission denied` running `bin/pg-repl-diag`:** the bind mount lost the
   exec bit — call it through bash instead, e.g.
   `docker exec -u postgres -w /opt/pg-repl-diag pg-primary bash bin/pg-repl-diag collect`.
+- **Windows / Git Bash mangles `/opt/...` (e.g. `Cwd must be an absolute path`
+  or `C:/Program Files/Git/opt/...`):** MSYS rewrites absolute paths passed to
+  `docker.exe`. Run these from **PowerShell**, or `cd` inside the container
+  instead of using `-w`, e.g.
+  `docker exec -u postgres pg-primary bash -lc "cd /opt/pg-repl-diag && bin/pg-repl-diag collect"`,
+  or prefix with `MSYS_NO_PATHCONV=1`.
 - **Re-cloning a standby:** `docker compose down -v` (volumes hold the data dir;
   the entrypoint only clones when the data dir is empty).
 - **Fan-out instead of cascading** (both standbys stream directly from the
