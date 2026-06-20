@@ -7,9 +7,9 @@
 # When time_lag exceeds the threshold, it performs a BURST CAPTURE under
 # BURST_DIR: a detailed snapshot of the incident at the moment it occurs.
 #
-# OUTPUT (append, restart-safe):
-#   $METRICS_DIR/standby_metrics.csv
-#   $BURST_DIR/burst_standby_<ts>.txt
+# OUTPUT (append, restart-safe; METRICS_PREFIX tags the files per node):
+#   $METRICS_DIR/[<prefix>_]standby_metrics.csv
+#   $BURST_DIR/burst_standby_[<prefix>_]<ts>.txt
 #
 # CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 #
@@ -17,10 +17,42 @@
 #   pg-repl-diag sample-standby
 #   nohup pg-repl-diag sample-standby >/dev/null 2>&1 &
 #
+# NOTE: each sample takes a 1-second iostat reading, so the real cadence is
+# INTERVAL + ~1s. Rates are computed from the actual epoch delta, so they stay
+# correct regardless of this overhead.
+#
 # Console output is mirrored automatically to a log file inside the project
 # (LOG_DIR, default output/log/sample-standby.log) — no /var/log needed.
 # -----------------------------------------------------------------------------
 set -u
+
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+pg-repl-diag sample-standby — periodic apply-side metrics sampler (run ON THE STANDBY)
+
+Usage:
+  pg-repl-diag sample-standby
+  nohup pg-repl-diag sample-standby >/dev/null 2>&1 &
+
+Appends a CSV row every INTERVAL seconds and writes a detailed burst capture
+whenever time_lag exceeds THRESHOLD_LAG_S. Restart-safe (append + header guard).
+
+Key environment (repl.script.env / repl.env, all overridable per invocation):
+  INTERVAL          seconds between samples (default 10; real cadence +~1s for iostat)
+  THRESHOLD_LAG_S   time_lag (s) that triggers a burst capture (default 30)
+  BURST_COOLDOWN    minimum seconds between bursts (default 120)
+  COUNT             0 = run forever; >0 = stop after N samples
+  METRICS_DIR       where the CSV is written
+  BURST_DIR         where burst captures are written
+  METRICS_PREFIX    tag output per node, e.g. METRICS_PREFIX="$(hostname -s)"
+  PGDATABASE/PGPORT libpq connection (PGHOST/PGUSER via env or ~/.pgpass)
+
+Example:
+  INTERVAL=5 pg-repl-diag sample-standby
+EOF
+    exit 0 ;;
+esac
 
 # Load central configuration (repl.script.env + repl.env) and validation helpers.
 # shellcheck source=../../lib/repl_common.sh
@@ -37,10 +69,12 @@ require PGDATABASE
 require PGPORT
 
 PGDB="$PGDATABASE"
+MPFX="${METRICS_PREFIX:-}"            # optional per-node tag (see repl.script.env)
 
 PSQL="psql -d ${PGDB} -X -At -q -F|"
-CSV="${METRICS_DIR}/standby_metrics.csv"
+CSV="${METRICS_DIR}/${MPFX:+${MPFX}_}standby_metrics.csv"
 ensure_dir "$METRICS_DIR" "$BURST_DIR"
+single_instance "$(basename "$CSV" .csv)"   # one sampler per node/output file
 CLK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
 
 command -v psql >/dev/null 2>&1 || die "psql not found"
@@ -55,14 +89,7 @@ HEADER="ts_epoch,ts_human,receive_lsn_bytes,replay_lsn_bytes,apply_gap_bytes,arr
 
 trap 'log_info "standby sampler stopped."; exit 0' INT TERM
 
-# Highest %util + device + await from a 1-second iostat sample
-iostat_peak() {
-    [ "$HAS_IOSTAT" = "0" ] && { echo "0 - 0"; return; }
-    iostat -dxy 1 1 2>/dev/null | awk '
-      /^Device/ { for(i=1;i<=NF;i++){ if($i=="%util")u=i; if($i=="await")a=i; if($i=="w_await")w=i } next }
-      NF>3 && u>0 { v=$u+0; if(v>m){m=v;d=$1;aw=(a?$a+0:(w?$w+0:0))} }
-      END{ printf "%.1f %s %.1f", m+0,(d==""?"-":d),aw+0 }'
-}
+# iostat_peak() is shared via lib/repl_common.sh (one 1-second iostat sample).
 # rtt(ms) and total retransmits from the replication socket (walreceiver -> primary:$PGPORT)
 sock_info() {
     local out rtt retr
@@ -124,7 +151,7 @@ while :; do
     # Burst capture
     if python3 -c "exit(0 if float('${tlag:-0}')>${THRESHOLD_LAG_S} else 1)" 2>/dev/null && [ $((EPOCH - last_burst)) -ge "$BURST_COOLDOWN" ]; then
         last_burst="$EPOCH"
-        BF="${BURST_DIR}/burst_standby_$(date '+%Y%m%d_%H%M%S').txt"
+        BF="${BURST_DIR}/burst_standby_${MPFX:+${MPFX}_}$(date '+%Y%m%d_%H%M%S').txt"
         {
             echo "=== STANDBY BURST @ ${HUMAN} (time_lag=${tlag}s > ${THRESHOLD_LAG_S}s) ==="
             echo "gap=$(python3 -c "print(f'{$gap/1048576:.1f}MB')") arrival=${arr}MB/s apply=${app}MB/s wait=${wait_ev} disk_util=${util}% cpu_redo=${cpu}%"

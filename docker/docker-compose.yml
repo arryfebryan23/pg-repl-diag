@@ -36,6 +36,7 @@ services:
     hostname: pg-primary
     environment:
       <<: *pg-env
+      METRICS_PREFIX: pg-primary          # tag sampler output per node (shared METRICS_DIR)
       TARGET: pg-standby1                 # `net-test` measures Primary -> standby1
       PEERS: "pg-standby1 pg-standby2"    # `collect` measures RTT to both standbys
     volumes:
@@ -55,6 +56,7 @@ services:
         condition: service_healthy
     environment:
       <<: *pg-env
+      METRICS_PREFIX: pg-standby1         # tag sampler output per node (shared METRICS_DIR)
       UPSTREAM_HOST: pg-primary
       SLOT_NAME: standby1_slot
       TARGET: pg-standby2                 # cascading: net-test standby1 -> standby2
@@ -76,6 +78,7 @@ services:
         condition: service_healthy
     environment:
       <<: *pg-env
+      METRICS_PREFIX: pg-standby2         # tag sampler output per node (shared METRICS_DIR)
       UPSTREAM_HOST: pg-standby1
       SLOT_NAME: standby2_slot
       PEERS: "pg-primary pg-standby1"
