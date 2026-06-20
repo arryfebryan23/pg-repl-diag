@@ -264,7 +264,32 @@ pg-repl-diag dashboard
 pg-repl-diag dashboard --metrics-dir ./output/metrics --burst-dir ./output/bursts \
                        --out ./output/dashboards/dashboard.html
 ```
-Open the generated `output/dashboards/dashboard.html` in a browser (local file, no internet required).
+This writes **three** self-contained pages (open any in a browser, no internet needed):
+
+| File | Contents |
+|------|----------|
+| `dashboard.html` | Overview: topology, node roles, global verdict, links |
+| `dashboard-primary.html` | Primary side: WAL generation rate + per-standby replication lag |
+| `dashboard-standby.html` | Standby side: apply/gap/disk/CPU/RTT + wait events |
+
+Every chart is **zoomable**: scroll to zoom the time axis, drag to pan,
+double-click to reset. All charts on a page share one time window, so they stay
+aligned while you zoom — and the axis adds dates (with midnight markers) once the
+window spans more than a day, so **multi-day captures** read cleanly.
+
+**Multiple nodes / cascade.** By default `primary_metrics.csv` and
+`standby_metrics.csv` are treated as the primary and the standby. To compare more
+nodes — or to show a **cascading standby** (a node that both receives and sends
+WAL, e.g. Primary → standby-B → standby-C, or a standby that was promoted) —
+copy each node's CSVs in with a node-name prefix:
+```bash
+# from node "edb-b" (a cascade middle node: receives from A, sends to C)
+cp edb-b:/…/output/metrics/standby_metrics.csv  output/metrics/edb-b_standby_metrics.csv
+cp edb-b:/…/output/metrics/primary_metrics.csv  output/metrics/edb-b_primary_metrics.csv
+```
+A node that appears under the same prefix in **both** roles is flagged **CASCADE**
+on both dashboards, with cross-links to its other role, so a cascade topology is
+unambiguous.
 
 ---
 
@@ -294,7 +319,12 @@ sudo systemctl daemon-reload && sudo systemctl enable --now repl-sampler
 
 ## Reading the Dashboard
 
-The top panel provides an **automatic verdict** plus summary cards. Key charts:
+Start on **`dashboard.html`** (Overview): it shows the topology, each node's role,
+the global verdict, and links to the two role pages. Use the nav bar to switch
+between Overview / Primary / Standby. Zoom controls (scroll / drag / double-click)
+apply to every chart, and the visible time window is shown top-right.
+
+**Standby page** — each standby node gets its own verdict, summary cards, and charts:
 
 - **Replication Lag (time_lag)** — the symptom users feel.
 - **Arrival vs Apply Rate** — if *apply* < *arrival*, the standby is falling behind → apply-bound.
@@ -302,7 +332,11 @@ The top panel provides an **automatic verdict** plus summary cards. Key charts:
 - **Resource Saturation** — disk %util & redo CPU (0–100 scale). Correlate with lag spikes.
 - **Network Quality** — rtt & retransmits on the replication socket.
 - **Wait Event Distribution** — where the redo process spends its time.
-- **WAL Generation Rate (primary)** & **per-standby lag** — compare standbys.
+
+**Primary page** — each primary node shows its **WAL Generation Rate** plus
+**replay_lag / total lag per downstream standby**, so you can compare standbys.
+For a **cascade** node, its upstream lag is on the Standby page and its downstream
+lag is on the Primary page (both carry a CASCADE badge linking to the other).
 
 ### Decision Tree
 

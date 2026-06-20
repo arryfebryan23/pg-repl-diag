@@ -1,16 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-libexec/pg-repl-diag/dashboard — render the raw sampler CSVs into an interactive HTML dashboard.
+libexec/pg-repl-diag/dashboard — render the raw sampler CSVs into interactive HTML dashboards.
 Invoked as: pg-repl-diag dashboard
 
 No external dependencies (standard library only). Charts are drawn with inline
 vanilla-JS canvas code, so the resulting HTML is 100% offline and safe to open
 on air-gapped servers.
 
+OUTPUT — three self-contained pages (derived from --out, default dashboard.html):
+  dashboard.html           Overview: topology, roles, global verdict, links
+  dashboard-primary.html   PRIMARY side: WAL rate + per-standby replication lag
+  dashboard-standby.html   STANDBY side: apply/gap/disk/CPU/RTT + wait events
+
+FEATURES:
+  * Zoom & pan the time axis — scroll to zoom, drag to pan, double-click to reset.
+    All charts on a page share one time window, so they stay aligned while you zoom.
+  * Multi-day ready — axis labels add the date as the window widens, midnight
+    boundaries are marked, and large datasets are decimated at draw time (full
+    detail returns as you zoom in).
+  * Multi-node / CASCADE ready — drop several nodes' CSVs into the metrics dir,
+    prefixed with the node name, and each node is rendered separately:
+        <node>_primary_metrics.csv   (a node that SENDS WAL)
+        <node>_standby_metrics.csv   (a node that RECEIVES WAL)
+    A node that appears under the SAME prefix in both roles (a cascading standby,
+    or a standby promoted to primary) is flagged CASCADE on both dashboards.
+    The bare default names map to two separate nodes — primary_metrics.csv -> node
+    "primary", standby_metrics.csv -> node "standby" — so the ordinary one-primary,
+    one-standby setup is NOT mistaken for a cascade.
+
 CONFIGURATION: default input/output directories are read from the environment
-(METRICS_DIR, BURST_DIR, DASHBOARD_DIR — set in repl.script.env) and can be
-overridden with CLI flags.
+(METRICS_DIR, BURST_DIR, DASHBOARD_DIR) and can be overridden with CLI flags.
 
 USAGE:
   # directories are loaded from repl.env automatically by the dispatcher:
@@ -22,21 +42,28 @@ USAGE:
 import argparse, csv, glob, json, os, html
 from datetime import datetime
 
+
+# --------------------------------------------------------------------------- #
+# CSV parsing helpers
+# --------------------------------------------------------------------------- #
 def fnum(v):
     try:
-        if v in ("", "-", None): return None
+        if v in ("", "-", None):
+            return None
         return float(v)
     except (ValueError, TypeError):
         return None
+
 
 def read_csv(path):
     rows = []
     if not path or not os.path.exists(path):
         return rows
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
         for r in csv.DictReader(f):
             rows.append(r)
     return rows
+
 
 def series(rows, ykey, xkey="ts_epoch"):
     out = []
@@ -46,6 +73,7 @@ def series(rows, ykey, xkey="ts_epoch"):
             out.append({"x": x, "y": y})
     return out
 
+
 def mb_series(rows, ykey):
     out = []
     for r in rows:
@@ -54,308 +82,633 @@ def mb_series(rows, ykey):
             out.append({"x": x, "y": round(y / 1048576.0, 2)})
     return out
 
+
 def summarize(vals):
     ys = [p["y"] for p in vals]
-    if not ys: return {"last": None, "max": None, "avg": None}
-    return {"last": ys[-1], "max": max(ys), "avg": round(sum(ys)/len(ys), 2)}
+    if not ys:
+        return {"last": None, "max": None, "avg": None}
+    return {"last": ys[-1], "max": max(ys), "avg": round(sum(ys) / len(ys), 2)}
 
-# ---------------------------------------------------------------------------
-# Defaults follow the output layout from repl.script.env; fall back to ./output/*.
+
+def extent(*lists_of_series):
+    """Min/max x across any number of point lists."""
+    xs = []
+    for lst in lists_of_series:
+        for p in lst:
+            xs.append(p["x"])
+    if not xs:
+        return None
+    return (min(xs), max(xs))
+
+
+# --------------------------------------------------------------------------- #
+# Node discovery (multi-node / cascade aware)
+# --------------------------------------------------------------------------- #
+def discover(metrics_dir, suffix, default_node):
+    """Map node-name -> csv path for every *<suffix> file in metrics_dir.
+    A bare 'primary_metrics.csv' -> node 'primary' (the default for that role),
+    'standby_metrics.csv' -> node 'standby'; a prefixed 'edb2_primary_metrics.csv'
+    -> node 'edb2'. Only a shared explicit prefix across both roles (e.g.
+    edb2_primary + edb2_standby) marks a node as CASCADE."""
+    found = {}
+    for p in sorted(glob.glob(os.path.join(metrics_dir, "*" + suffix))):
+        base = os.path.basename(p)
+        node = base[: -len(suffix)].rstrip("_-") or default_node
+        found[node] = p
+    return found
+
+
+def build_primary(rows):
+    out = {"wal_rate": [], "standbys": {}}
+    seen = set()
+    for r in rows:
+        ts = r.get("ts_epoch")
+        if ts not in seen:
+            wr = fnum(r.get("wal_rate_mbps"))
+            if wr is not None:
+                out["wal_rate"].append({"x": fnum(ts), "y": wr})
+            seen.add(ts)
+        name = r.get("standby") or "-"
+        if name in ("(no-standby)", "-"):
+            continue
+        d = out["standbys"].setdefault(name, {"replay_lag": [], "total_lag_mb": [], "sync": "-"})
+        d["sync"] = r.get("sync_state") or d["sync"]
+        x = fnum(ts)
+        rl = fnum(r.get("replay_lag_s"))
+        tl = fnum(r.get("total_lag_bytes"))
+        if x is not None and rl is not None:
+            d["replay_lag"].append({"x": x, "y": rl})
+        if x is not None and tl is not None:
+            d["total_lag_mb"].append({"x": x, "y": round(tl / 1048576.0, 2)})
+    return out
+
+
+def build_standby(rows):
+    d = {
+        "time_lag":    series(rows, "time_lag_s"),
+        "arrival":     series(rows, "arrival_mbps"),
+        "apply":       series(rows, "apply_mbps"),
+        "gap_mb":      mb_series(rows, "apply_gap_bytes"),
+        "disk_util":   series(rows, "disk_util"),
+        "cpu_startup": series(rows, "cpu_startup_pct"),
+        "rtt":         series(rows, "sock_rtt_ms"),
+        "retrans":     series(rows, "sock_retrans"),
+        "waitevents":  {},
+    }
+    for r in rows:
+        we = (r.get("wait_event") or "").strip()
+        if we and we not in ("-", "-/-", "-/running"):
+            d["waitevents"][we] = d["waitevents"].get(we, 0) + 1
+    return d
+
+
+def verdict_standby(sd, rowcount):
+    """Heuristic apply/network verdict for one standby node."""
+    text, cls, notes = "Insufficient data", "warn", []
+    if not rowcount:
+        return {"text": text, "cls": cls, "notes": notes}
+    s_lag = summarize(sd["time_lag"])
+    s_arr = summarize(sd["arrival"]); s_app = summarize(sd["apply"])
+    s_util = summarize(sd["disk_util"]); s_cpu = summarize(sd["cpu_startup"])
+    retr = sd["retrans"]
+    retr_delta = (retr[-1]["y"] - retr[0]["y"]) if len(retr) >= 2 else None
+
+    apply_slower = (s_arr["avg"] is not None and s_app["avg"] is not None
+                    and s_app["avg"] < s_arr["avg"] * 0.9)
+    lag_max = s_lag["max"] or 0
+    if lag_max > 30 and apply_slower:
+        if (s_util["max"] or 0) > 80:
+            text, cls = "APPLY-BOUND -> standby disk I/O", "bad"
+            notes.append(f"Disk %util peaked at {s_util['max']:.0f}% during high lag.")
+        elif (s_cpu["max"] or 0) > 85:
+            text, cls = "APPLY-BOUND -> single-thread CPU (redo)", "bad"
+            notes.append(f"Startup process CPU peaked at {s_cpu['max']:.0f}% (one core saturated).")
+        else:
+            text, cls = "APPLY-BOUND -> standby not keeping up with WAL", "bad"
+        notes.append(f"Average apply {s_app['avg'] or 0:.2f} MB/s < arrival {s_arr['avg'] or 0:.2f} MB/s.")
+    elif lag_max > 30 and (s_arr["avg"] or 0) < 1.0:
+        text, cls = "Likely NETWORK-BOUND (WAL arriving slowly)", "warn"
+        notes.append(f"Low arrival ({s_arr['avg'] or 0:.2f} MB/s) despite high lag.")
+        if retr_delta and retr_delta > 0:
+            notes.append(f"Retransmits rose by {int(retr_delta)} over the period -> indicates packet loss.")
+    elif lag_max <= 30:
+        text, cls = "HEALTHY (lag under control during this period)", "good"
+        notes.append(f"Peak time_lag {lag_max:.1f} s.")
+    return {"text": text, "cls": cls, "notes": notes}
+
+
+def cards_for_standby(sd):
+    def c(title, sm, unit):
+        return {"title": title, "last": sm["last"], "max": sm["max"], "avg": sm["avg"], "unit": unit}
+    return [
+        c("Replication lag", summarize(sd["time_lag"]), " s"),
+        c("Apply rate", summarize(sd["apply"]), " MB/s"),
+        c("Arrival rate", summarize(sd["arrival"]), " MB/s"),
+        c("Disk %util", summarize(sd["disk_util"]), " %"),
+        c("CPU redo (startup)", summarize(sd["cpu_startup"]), " %"),
+        c("Socket RTT", summarize(sd["rtt"]), " ms"),
+    ]
+
+
+def load_bursts(burst_dir, kind):
+    res = []
+    if burst_dir and os.path.isdir(burst_dir):
+        for bf in sorted(glob.glob(os.path.join(burst_dir, "burst_%s_*.txt" % kind))):
+            try:
+                with open(bf, encoding="utf-8", errors="replace") as f:
+                    head = f.readline().strip()
+            except OSError:
+                head = ""
+            res.append({"file": os.path.basename(bf), "head": head})
+    return res
+
+
+# --------------------------------------------------------------------------- #
+# Arguments & discovery
+# --------------------------------------------------------------------------- #
 DEF_METRICS   = os.environ.get("METRICS_DIR", "./output/metrics")
 DEF_BURST     = os.environ.get("BURST_DIR", "./output/bursts")
 DEF_DASHBOARD = os.environ.get("DASHBOARD_DIR", "./output/dashboards")
 
-ap = argparse.ArgumentParser()
+ap = argparse.ArgumentParser(description="Render sampler CSVs into interactive HTML dashboards.")
 ap.add_argument("--metrics-dir", default=DEF_METRICS, help="directory containing *_metrics.csv")
 ap.add_argument("--burst-dir", default=DEF_BURST, help="directory containing burst_*.txt")
-ap.add_argument("--primary", default=None, help="explicit path to primary_metrics.csv")
-ap.add_argument("--standby", default=None, help="explicit path to standby_metrics.csv")
-ap.add_argument("--out", default=os.path.join(DEF_DASHBOARD, "dashboard.html"))
+ap.add_argument("--primary", default=None, help="explicit path to a single primary_metrics.csv (node 'local')")
+ap.add_argument("--standby", default=None, help="explicit path to a single standby_metrics.csv (node 'local')")
+ap.add_argument("--out", default=os.path.join(DEF_DASHBOARD, "dashboard.html"),
+                help="overview page path; the -primary/-standby pages are written alongside it")
 args = ap.parse_args()
 
-primary_csv = args.primary or os.path.join(args.metrics_dir, "primary_metrics.csv")
-standby_csv = args.standby or os.path.join(args.metrics_dir, "standby_metrics.csv")
-burst_dir = args.burst_dir
+if args.primary or args.standby:
+    primary_files = {"primary": args.primary} if args.primary else {}
+    standby_files = {"standby": args.standby} if args.standby else {}
+else:
+    primary_files = discover(args.metrics_dir, "primary_metrics.csv", "primary")
+    standby_files = discover(args.metrics_dir, "standby_metrics.csv", "standby")
 
-prows = read_csv(primary_csv)
-srows = read_csv(standby_csv)
+# Build per-node payloads.
+primary_nodes = []   # [{name, cascade, rows, wal_rate, standbys}]
+standby_nodes = []   # [{name, cascade, rows, ...series, verdict, cards}]
+all_xs = []          # for the global default time window
 
-# ---- build PRIMARY data ----
-primary = {"wal_rate": [], "standbys": {}}
-seen_ts = set()
-for r in prows:
-    ts = r.get("ts_epoch")
-    if ts not in seen_ts:
-        wr = fnum(r.get("wal_rate_mbps"))
-        if wr is not None:
-            primary["wal_rate"].append({"x": fnum(ts), "y": wr})
-        seen_ts.add(ts)
-    name = r.get("standby") or "-"
-    if name in ("(no-standby)", "-"): continue
-    d = primary["standbys"].setdefault(name, {"replay_lag": [], "total_lag_mb": []})
-    x = fnum(ts); rl = fnum(r.get("replay_lag_s")); tl = fnum(r.get("total_lag_bytes"))
-    if x is not None and rl is not None: d["replay_lag"].append({"x": x, "y": rl})
-    if x is not None and tl is not None: d["total_lag_mb"].append({"x": x, "y": round(tl/1048576.0, 2)})
+primary_names = set(primary_files)
+standby_names = set(standby_files)
+cascade_names = primary_names & standby_names
 
-# ---- build STANDBY data ----
-standby = {
-    "time_lag":   series(srows, "time_lag_s"),
-    "arrival":    series(srows, "arrival_mbps"),
-    "apply":      series(srows, "apply_mbps"),
-    "gap_mb":     mb_series(srows, "apply_gap_bytes"),
-    "disk_util":  series(srows, "disk_util"),
-    "cpu_startup":series(srows, "cpu_startup_pct"),
-    "rtt":        series(srows, "sock_rtt_ms"),
-    "retrans":    series(srows, "sock_retrans"),
-    "waitevents": {},
-}
-for r in srows:
-    we = (r.get("wait_event") or "").strip()
-    if we and we not in ("-", "-/-", "-/running"):
-        standby["waitevents"][we] = standby["waitevents"].get(we, 0) + 1
+for name in sorted(primary_files):
+    rows = read_csv(primary_files[name])
+    pd = build_primary(rows)
+    all_xs.append(pd["wal_rate"])
+    for sb in pd["standbys"].values():
+        all_xs.append(sb["replay_lag"]); all_xs.append(sb["total_lag_mb"])
+    primary_nodes.append({
+        "name": name, "cascade": name in cascade_names, "rows": len(rows),
+        "wal_rate": pd["wal_rate"], "standbys": pd["standbys"],
+        "wal_summary": summarize(pd["wal_rate"]),
+    })
 
-# ---- heuristic verdict ----
-verdict, vclass, notes = "Insufficient data", "warn", []
-s_lag = summarize(standby["time_lag"])
-s_arr = summarize(standby["arrival"]); s_app = summarize(standby["apply"])
-s_util = summarize(standby["disk_util"]); s_cpu = summarize(standby["cpu_startup"])
-s_retr0 = standby["retrans"][0]["y"] if standby["retrans"] else None
-s_retrN = standby["retrans"][-1]["y"] if standby["retrans"] else None
-retr_delta = (s_retrN - s_retr0) if (s_retr0 is not None and s_retrN is not None) else None
+for name in sorted(standby_files):
+    rows = read_csv(standby_files[name])
+    sd = build_standby(rows)
+    for k in ("time_lag", "arrival", "apply", "gap_mb", "disk_util", "cpu_startup", "rtt", "retrans"):
+        all_xs.append(sd[k])
+    node = {
+        "name": name, "cascade": name in cascade_names, "rows": len(rows),
+        "verdict": verdict_standby(sd, len(rows)),
+        "cards": cards_for_standby(sd),
+    }
+    node.update(sd)
+    standby_nodes.append(node)
 
-if srows:
-    apply_slower = (s_arr["avg"] is not None and s_app["avg"] is not None and s_app["avg"] < s_arr["avg"]*0.9)
-    if (s_lag["max"] or 0) > 30 and apply_slower:
-        if (s_util["max"] or 0) > 80:
-            verdict, vclass = "APPLY-BOUND -> standby disk I/O", "bad"
-            notes.append("Disk %%util peaked at %.0f%% during high lag." % s_util["max"])
-        elif (s_cpu["max"] or 0) > 85:
-            verdict, vclass = "APPLY-BOUND -> single-thread CPU (redo)", "bad"
-            notes.append("Startup process CPU peaked at %.0f%% (one core saturated)." % s_cpu["max"])
-        else:
-            verdict, vclass = "APPLY-BOUND -> standby not keeping up with WAL", "bad"
-        notes.append("Average apply %.2f MB/s < arrival %.2f MB/s." % (s_app["avg"] or 0, s_arr["avg"] or 0))
-    elif (s_lag["max"] or 0) > 30 and (s_arr["avg"] or 0) < 1.0:
-        verdict, vclass = "Likely NETWORK-BOUND (WAL arriving slowly)", "warn"
-        notes.append("Low arrival (%.2f MB/s) despite high lag." % (s_arr["avg"] or 0))
-        if retr_delta and retr_delta > 0:
-            notes.append("Retransmits rose by %d over the period -> indicates packet loss." % int(retr_delta))
-    elif (s_lag["max"] or 0) <= 30:
-        verdict, vclass = "HEALTHY (lag under control during this period)", "good"
-        notes.append("Peak time_lag %.1f s." % (s_lag["max"] or 0))
-elif prows:
-    verdict, vclass = "Primary data available (see per-standby lag charts)", "warn"
+xfull = extent(*all_xs) or (0, 1)
 
-# ---- burst incident list ----
-bursts = []
-if burst_dir and os.path.isdir(burst_dir):
-    for bf in sorted(glob.glob(os.path.join(burst_dir, "burst_*.txt"))):
-        try:
-            with open(bf) as f: head = f.readline().strip()
-        except OSError: head = ""
-        bursts.append({"file": os.path.basename(bf), "head": head})
+# Global verdict for the overview = worst standby verdict.
+RANK = {"bad": 3, "warn": 2, "good": 1}
+global_verdict = {"text": "No standby data collected", "cls": "warn", "notes": []}
+best_rank = -1
+for n in standby_nodes:
+    r = RANK.get(n["verdict"]["cls"], 0)
+    if r > best_rank:
+        best_rank = r
+        gv = dict(n["verdict"])
+        gv["text"] = ("[%s] " % n["name"]) + gv["text"] if len(standby_nodes) > 1 else gv["text"]
+        global_verdict = gv
+
+bursts_primary = load_bursts(args.burst_dir, "primary")
+bursts_standby = load_bursts(args.burst_dir, "standby")
 
 meta = {
     "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "primary_rows": len(prows), "standby_rows": len(srows),
-    "primary_csv": primary_csv or "-", "standby_csv": standby_csv or "-",
+    "span_from": datetime.fromtimestamp(xfull[0]).strftime("%Y-%m-%d %H:%M") if all_xs and xfull != (0, 1) else "-",
+    "span_to":   datetime.fromtimestamp(xfull[1]).strftime("%Y-%m-%d %H:%M") if all_xs and xfull != (0, 1) else "-",
+    "primary_node_count": len(primary_nodes),
+    "standby_node_count": len(standby_nodes),
+    "cascade_nodes": sorted(cascade_names),
 }
 
-# summary HTML cards
-def card(title, sm, unit):
-    if not sm or sm["last"] is None:
-        return '<div class="card"><h4>%s</h4><div class="big">-</div></div>' % html.escape(title)
-    return ('<div class="card"><h4>%s</h4><div class="big">%s<span>%s</span></div>'
-            '<div class="sub">peak %s · avg %s</div></div>') % (
-            html.escape(title), sm["last"], unit, sm["max"], sm["avg"])
 
-cards = "".join([
-    card("Replication lag (standby)", s_lag, " s"),
-    card("Apply rate", s_app, " MB/s"),
-    card("Arrival rate", s_arr, " MB/s"),
-    card("Disk %util (standby)", s_util, " %"),
-    card("CPU redo (startup)", s_cpu, " %"),
-    card("Socket RTT", summarize(standby["rtt"]), " ms"),
-])
-notes_html = "".join("<li>%s</li>" % html.escape(n) for n in notes)
-burst_html = ("".join('<li><b>%s</b> — %s</li>' % (html.escape(b["file"]), html.escape(b["head"]))
-              for b in bursts) or "<li>No burst incidents recorded.</li>")
-
-DATA = {"primary": primary, "standby": standby, "meta": meta}
-
-# ===========================================================================
-TEMPLATE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Replication Diagnostics Dashboard</title>
-<style>
+# --------------------------------------------------------------------------- #
+# Shared HTML / CSS / JS
+# --------------------------------------------------------------------------- #
+CSS = r"""
   :root{--bg:#0f1419;--panel:#1a2129;--line:#2a3441;--fg:#e6edf3;--mut:#8b98a5;--accent:#4aa8ff;}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
-  header{padding:20px 24px;border-bottom:1px solid var(--line)}
+  header{padding:18px 24px;border-bottom:1px solid var(--line)}
   h1{margin:0;font-size:20px}
+  h2{font-size:16px;margin:26px 0 4px}
   .meta{color:var(--mut);font-size:12px;margin-top:4px}
-  .wrap{padding:20px 24px;max-width:1200px;margin:0 auto}
+  nav{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+  nav a{color:var(--fg);text-decoration:none;font-size:13px;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  nav a.active{border-color:var(--accent);color:var(--accent)}
+  .wrap{padding:18px 24px;max-width:1200px;margin:0 auto}
   .verdict{padding:14px 18px;border-radius:10px;margin-bottom:18px;font-weight:600;font-size:15px}
   .verdict.good{background:#10311f;border:1px solid #2ea043;color:#7ee787}
   .verdict.warn{background:#3a2f10;border:1px solid #d29922;color:#f2cc60}
   .verdict.bad {background:#3a1418;border:1px solid #f85149;color:#ff9492}
   .verdict ul{margin:8px 0 0;padding-left:20px;font-weight:400;font-size:13px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:22px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
   .card h4{margin:0 0 6px;color:var(--mut);font-size:12px;font-weight:500;text-transform:uppercase;letter-spacing:.4px}
-  .big{font-size:26px;font-weight:700}.big span{font-size:13px;color:var(--mut);font-weight:400;margin-left:3px}
+  .big{font-size:24px;font-weight:700}.big span{font-size:13px;color:var(--mut);font-weight:400;margin-left:3px}
   .sub{color:var(--mut);font-size:12px;margin-top:2px}
-  .chart{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:18px}
+  .toolbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;background:rgba(15,20,25,.92);
+           backdrop-filter:blur(4px);border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin-bottom:14px}
+  .toolbar button{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:6px 12px;cursor:pointer;font-size:13px}
+  .toolbar button:hover{border-color:var(--accent)}
+  .toolbar .hint{color:var(--mut);font-size:12px}
+  .toolbar .range{margin-left:auto;color:var(--accent);font-size:12px;font-variant-numeric:tabular-nums}
+  .nodehdr{display:flex;align-items:center;gap:10px;border-top:1px solid var(--line);margin-top:10px;padding-top:6px}
+  .badge{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;background:#3a2f10;border:1px solid #d29922;color:#f2cc60}
+  .chart{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:16px}
   .chart h3{margin:0 0 2px;font-size:15px}.chart .hint{color:var(--mut);font-size:12px;margin-bottom:8px}
-  canvas{width:100%;height:240px;display:block}
+  canvas{width:100%;height:240px;display:block;touch-action:none;cursor:crosshair}
   .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-top:6px;color:var(--mut)}
   .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px}
   .bars{display:flex;flex-direction:column;gap:6px;margin-top:6px}
   .bar{display:flex;align-items:center;gap:8px;font-size:12px}
   .bar .track{flex:1;background:var(--line);border-radius:4px;height:16px;overflow:hidden}
   .bar .fill{height:100%;background:var(--accent)}
-  .burst{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  table.topo{width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px}
+  table.topo th,table.topo td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  table.topo th{color:var(--mut);font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.4px}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);margin-right:4px}
+  .pill.p{background:#10243a;border-color:#4aa8ff;color:#8cc8ff}
+  .pill.s{background:#102a1c;border-color:#2ea043;color:#7ee787}
+  .pill.c{background:#3a2f10;border-color:#d29922;color:#f2cc60}
+  .burst{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-top:10px}
   .burst ul{margin:8px 0 0;padding-left:18px;font-size:13px}
   footer{color:var(--mut);font-size:12px;padding:16px 24px;text-align:center}
   .empty{color:var(--mut);font-style:italic;padding:30px;text-align:center}
-</style></head>
-<body>
-<header>
-  <h1>PostgreSQL Replication Diagnostics</h1>
-  <div class="meta">Generated __GEN__ · primary: __PROWS__ rows · standby: __SROWS__ rows</div>
-</header>
-<div class="wrap">
-  <div class="verdict __VCLASS__">VERDICT: __VERDICT__<ul>__NOTES__</ul></div>
-  <div class="cards">__CARDS__</div>
-  <div id="charts"></div>
-  <div class="burst"><h3>Incidents (burst captures)</h3><ul>__BURSTS__</ul></div>
-</div>
-<footer>Self-contained · rendered offline with no external libraries</footer>
+"""
 
-<script>
-const DATA = __DATA__;
+# Chart engine: zoom (wheel), pan (drag), reset (dblclick), shared time window
+# across all charts on the page, draw-time min/max decimation, date-aware axis.
+ENGINE_JS = r"""
+const CHARTS=[];
+let FULL={xMin:0,xMax:1}, VIEW={xMin:0,xMax:1};
+const P2=n=>String(n).padStart(2,'0');
+function fmtFull(ep){const d=new Date(ep*1000);
+  return d.getFullYear()+'-'+P2(d.getMonth()+1)+'-'+P2(d.getDate())+' '+P2(d.getHours())+':'+P2(d.getMinutes())+':'+P2(d.getSeconds());}
+function fmtShort(ep){const d=new Date(ep*1000);return P2(d.getMonth()+1)+'-'+P2(d.getDate())+' '+P2(d.getHours())+':'+P2(d.getMinutes());}
+function tickLabel(ep,span){const d=new Date(ep*1000);
+  if(span>2*86400) return P2(d.getMonth()+1)+'/'+P2(d.getDate());
+  if(span>2*3600)  return P2(d.getMonth()+1)+'/'+P2(d.getDate())+' '+P2(d.getHours())+':'+P2(d.getMinutes());
+  if(span>120)     return P2(d.getHours())+':'+P2(d.getMinutes());
+  return P2(d.getHours())+':'+P2(d.getMinutes())+':'+P2(d.getSeconds());}
 
-function fmtTime(ep){const d=new Date(ep*1000);const p=n=>String(n).padStart(2,'0');return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}
+function setFull(mn,mx){if(!(mx>mn))mx=mn+1;FULL={xMin:mn,xMax:mx};VIEW={xMin:mn,xMax:mx};}
+function clampView(mn,mx){const minSpan=2;
+  if(mx-mn<minSpan){const c=(mn+mx)/2;mn=c-minSpan/2;mx=c+minSpan/2;}
+  if(mn<FULL.xMin)mn=FULL.xMin; if(mx>FULL.xMax)mx=FULL.xMax;
+  if(mx-mn<minSpan)mx=Math.min(FULL.xMax,mn+minSpan);
+  return {xMin:mn,xMax:mx};}
+function setView(mn,mx){VIEW=clampView(mn,mx);redrawAll();updateRange();}
+function resetView(){VIEW={xMin:FULL.xMin,xMax:FULL.xMax};redrawAll();updateRange();}
+function redrawAll(){CHARTS.forEach(c=>c.draw());}
+function updateRange(){const el=document.getElementById('rangeReadout');
+  if(el)el.textContent=fmtFull(VIEW.xMin)+'  to  '+fmtFull(VIEW.xMax);}
 
-function drawChart(canvas, cfg){
-  const dpr=window.devicePixelRatio||1;
-  const cssW=canvas.clientWidth, cssH=canvas.clientHeight;
-  canvas.width=cssW*dpr; canvas.height=cssH*dpr;
-  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
-  const W=cssW,H=cssH,padL=52,padR=14,padT=10,padB=24;
-  const all=[].concat(...cfg.series.map(s=>s.data));
-  if(all.length===0){ctx.fillStyle='#8b98a5';ctx.font='13px sans-serif';ctx.fillText('(no data)',padL,H/2);return;}
-  const xs=all.map(p=>p.x), ys=all.map(p=>p.y);
-  let xMin=Math.min(...xs),xMax=Math.max(...xs);
-  let yMin=0,yMax=cfg.yMax!=null?cfg.yMax:Math.max(...ys,0.0001);
-  yMax=yMax*1.1||1; if(xMax===xMin)xMax=xMin+1;
-  const px=x=>padL+(x-xMin)/(xMax-xMin)*(W-padL-padR);
-  const py=y=>H-padB-(y-yMin)/(yMax-yMin)*(H-padT-padB);
-  // grid + y labels
-  ctx.strokeStyle='#2a3441';ctx.fillStyle='#8b98a5';ctx.font='11px sans-serif';ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){const v=yMin+(yMax-yMin)*i/4;const yy=py(v);
-    ctx.beginPath();ctx.moveTo(padL,yy);ctx.lineTo(W-padR,yy);ctx.stroke();
-    ctx.fillText(v>=100?v.toFixed(0):v.toFixed(1),6,yy+3);}
-  // x labels
-  for(let i=0;i<=5;i++){const x=xMin+(xMax-xMin)*i/5;
-    ctx.fillText(fmtTime(x),px(x)-18,H-8);}
-  // series
-  cfg.series.forEach(s=>{
-    if(s.data.length===0)return;
-    ctx.strokeStyle=s.color;ctx.lineWidth=1.8;ctx.beginPath();
-    s.data.forEach((p,i)=>{const X=px(p.x),Y=py(p.y);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
-    ctx.stroke();
-  });
-  // hover
-  canvas.onmousemove=e=>{
-    const r=canvas.getBoundingClientRect();const mx=e.clientX-r.left;
-    const tx=xMin+(mx-padL)/(W-padL-padR)*(xMax-xMin);
-    drawChart(canvas,cfg); // redraw base
-    ctx.strokeStyle='#5b6673';ctx.beginPath();ctx.moveTo(mx,padT);ctx.lineTo(mx,H-padB);ctx.stroke();
-    let lines=[fmtTime(tx)];
-    cfg.series.forEach(s=>{if(!s.data.length)return;
-      let best=s.data[0];for(const p of s.data)if(Math.abs(p.x-tx)<Math.abs(best.x-tx))best=p;
-      lines.push(s.name+': '+best.y);});
-    const bw=120,bh=lines.length*15+8;let bx=mx+8;if(bx+bw>W)bx=mx-bw-8;
-    ctx.fillStyle='rgba(10,14,20,.92)';ctx.fillRect(bx,padT,bw,bh);
-    ctx.fillStyle='#e6edf3';ctx.font='11px sans-serif';
-    lines.forEach((l,i)=>ctx.fillText(l,bx+6,padT+15+i*15));
-  };
-  canvas.onmouseleave=()=>drawChart(canvas,cfg);
-}
+// Decimate to ~1 point per pixel using a min/max envelope (preserves spikes).
+function decimate(data,xMin,xMax,w){
+  if(!data.length)return [];
+  const inView=[];
+  for(let i=0;i<data.length;i++){const x=data[i].x;
+    if(x>=xMin&&x<=xMax){if(!inView.length&&i>0)inView.push(data[i-1]);inView.push(data[i]);}
+    else if(x>xMax){inView.push(data[i]);break;}}
+  if(inView.length<=w*2)return inView;
+  const span=(xMax-xMin)||1,out=[];let curPx=-1,lo=null,hi=null;
+  const flush=()=>{if(lo&&hi){if(lo.x<=hi.x){out.push(lo);if(hi!==lo)out.push(hi);}else{out.push(hi);if(lo!==hi)out.push(lo);}}};
+  for(const pt of inView){const px=Math.floor((pt.x-xMin)/span*w);
+    if(px!==curPx){flush();curPx=px;lo=pt;hi=pt;}
+    else{if(pt.y<lo.y)lo=pt;if(pt.y>hi.y)hi=pt;}}
+  flush();return out;}
+
+function makeChart(canvas,cfg){
+  const padL=56,padR=14,padT=12,padB=26;
+  function plot(){
+    const dpr=window.devicePixelRatio||1,cssW=canvas.clientWidth,cssH=canvas.clientHeight;
+    canvas.width=cssW*dpr;canvas.height=cssH*dpr;
+    const ctx=canvas.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
+    const W=cssW,H=cssH,plotW=W-padL-padR,plotH=H-padT-padB;
+    ctx.clearRect(0,0,W,H);
+    const xMin=VIEW.xMin,xMax=VIEW.xMax,span=(xMax-xMin)||1;
+    const dec=cfg.series.map(s=>decimate(s.data,xMin,xMax,plotW));
+    let ys=[];dec.forEach(d=>d.forEach(p=>ys.push(p.y)));
+    let yMax=cfg.yMax!=null?cfg.yMax:(ys.length?Math.max(...ys):1);
+    if(cfg.yMax==null){yMax=yMax*1.1||1;}
+    const yMin=0;
+    if(!ys.length){ctx.fillStyle='#8b98a5';ctx.font='13px sans-serif';ctx.fillText('(no data in view)',padL,H/2);}
+    const px=x=>padL+(x-xMin)/span*plotW;
+    const py=y=>padT+plotH-(y-yMin)/((yMax-yMin)||1)*plotH;
+    ctx.strokeStyle='#2a3441';ctx.fillStyle='#8b98a5';ctx.font='11px sans-serif';ctx.lineWidth=1;
+    for(let i=0;i<=4;i++){const v=yMin+(yMax-yMin)*i/4,yy=py(v);
+      ctx.beginPath();ctx.moveTo(padL,yy);ctx.lineTo(W-padR,yy);ctx.stroke();
+      ctx.fillText(v>=100?v.toFixed(0):v.toFixed(1),6,yy+3);}
+    // midnight boundary markers when the window spans hours/days
+    if(span>3600){const d0=new Date(xMin*1000);d0.setHours(24,0,0,0);
+      for(let t=d0.getTime()/1000;t<xMax;t+=86400){const X=px(t);
+        ctx.strokeStyle='#3a4655';ctx.setLineDash([3,3]);
+        ctx.beginPath();ctx.moveTo(X,padT);ctx.lineTo(X,padT+plotH);ctx.stroke();ctx.setLineDash([]);
+        ctx.fillStyle='#6f7d8c';ctx.fillText(P2(new Date(t*1000).getMonth()+1)+'/'+P2(new Date(t*1000).getDate()),X+3,padT+11);}}
+    ctx.fillStyle='#8b98a5';
+    for(let i=0;i<=5;i++){const xv=xMin+span*i/5,X=px(xv);
+      ctx.fillText(tickLabel(xv,span),Math.min(Math.max(X-20,2),W-46),H-8);}
+    ctx.save();ctx.beginPath();ctx.rect(padL,padT,plotW,plotH);ctx.clip();
+    cfg.series.forEach((s,si)=>{const d=dec[si];if(!d.length)return;
+      ctx.strokeStyle=s.color;ctx.lineWidth=1.7;ctx.beginPath();
+      d.forEach((p,i)=>{const X=px(p.x),Y=py(p.y);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.stroke();});
+    ctx.restore();
+    canvas._g={padL,padR,padT,padB,W,H,plotW,plotH,xMin,xMax,span,dec};
+  }
+  function hover(mx){plot();const g=canvas._g;if(!g||mx<g.padL||mx>g.W-g.padR)return;
+    const ctx=canvas.getContext('2d');
+    const tx=g.xMin+(mx-g.padL)/g.plotW*g.span;
+    ctx.strokeStyle='#5b6673';ctx.beginPath();ctx.moveTo(mx,g.padT);ctx.lineTo(mx,g.padT+g.plotH);ctx.stroke();
+    let lines=[fmtFull(tx)];
+    cfg.series.forEach((s,si)=>{const dd=g.dec[si];if(!dd||!dd.length)return;let best=null,bd=1e18;
+      for(const p of dd){const k=Math.abs(p.x-tx);if(k<bd){bd=k;best=p;}}
+      if(best)lines.push(s.name+': '+best.y);});
+    const bw=180,bh=lines.length*15+8;let bx=mx+10;if(bx+bw>g.W)bx=mx-bw-10;if(bx<2)bx=2;
+    ctx.fillStyle='rgba(8,12,18,.94)';ctx.fillRect(bx,g.padT,bw,bh);
+    ctx.strokeStyle='#2a3441';ctx.strokeRect(bx,g.padT,bw,bh);
+    ctx.fillStyle='#e6edf3';ctx.font='11px sans-serif';lines.forEach((l,i)=>ctx.fillText(l,bx+6,g.padT+15+i*15));}
+  let dragging=false,lastX=0;
+  canvas.addEventListener('wheel',e=>{e.preventDefault();
+    const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left;
+    const frac=Math.min(Math.max((mx-padL)/(canvas.clientWidth-padL-padR),0),1);
+    const xAt=VIEW.xMin+frac*(VIEW.xMax-VIEW.xMin),f=e.deltaY<0?0.8:1.25;
+    setView(xAt-(xAt-VIEW.xMin)*f,xAt+(VIEW.xMax-xAt)*f);},{passive:false});
+  canvas.addEventListener('mousedown',e=>{dragging=true;lastX=e.clientX;canvas.style.cursor='grabbing';});
+  window.addEventListener('mouseup',()=>{dragging=false;canvas.style.cursor='crosshair';});
+  canvas.addEventListener('mousemove',e=>{const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left;
+    if(dragging){const dx=e.clientX-lastX;lastX=e.clientX;const g=canvas._g;if(!g)return;
+      const dt=-dx/g.plotW*g.span;setView(VIEW.xMin+dt,VIEW.xMax+dt);}else hover(mx);});
+  canvas.addEventListener('mouseleave',()=>plot());
+  canvas.addEventListener('dblclick',()=>resetView());
+  const chart={draw:plot};CHARTS.push(chart);return chart;}
 
 function chartBlock(title,hint,cfg){
   const d=document.createElement('div');d.className='chart';
   d.innerHTML='<h3>'+title+'</h3><div class="hint">'+hint+'</div><canvas></canvas>'+
     '<div class="legend">'+cfg.series.map(s=>'<span><i style="background:'+s.color+'"></i>'+s.name+'</span>').join('')+'</div>';
   document.getElementById('charts').appendChild(d);
-  const cv=d.querySelector('canvas');requestAnimationFrame(()=>drawChart(cv,cfg));
-}
+  const cv=d.querySelector('canvas');requestAnimationFrame(()=>makeChart(cv,cfg).draw());}
 function barBlock(title,hint,obj){
   const d=document.createElement('div');d.className='chart';
-  const ent=Object.entries(obj).sort((a,b)=>b[1]-a[1]);
-  const max=ent.length?ent[0][1]:1;
+  const ent=Object.entries(obj).sort((a,b)=>b[1]-a[1]),max=ent.length?ent[0][1]:1;
   let h='<h3>'+title+'</h3><div class="hint">'+hint+'</div><div class="bars">';
   if(!ent.length)h+='<div class="empty">(no wait events recorded)</div>';
-  ent.forEach(([k,v])=>{h+='<div class="bar"><span style="width:170px">'+k+'</span><div class="track"><div class="fill" style="width:'+(v/max*100)+'%"></div></div><span>'+v+'</span></div>';});
-  h+='</div>';d.innerHTML=h;document.getElementById('charts').appendChild(d);
-}
+  ent.forEach(([k,v])=>{h+='<div class="bar"><span style="width:180px">'+k+'</span><div class="track"><div class="fill" style="width:'+(v/max*100)+'%"></div></div><span>'+v+'</span></div>';});
+  h+='</div>';d.innerHTML=h;document.getElementById('charts').appendChild(d);}
+function nodeHeader(text,badge){const d=document.createElement('div');d.className='nodehdr';
+  d.innerHTML='<h2>'+text+'</h2>'+(badge?'<span class="badge">'+badge+'</span>':'');
+  document.getElementById('charts').appendChild(d);}
+function verdictBlock(v){if(!v)return;const d=document.createElement('div');d.className='verdict '+v.cls;
+  d.innerHTML='VERDICT: '+v.text+'<ul>'+v.notes.map(n=>'<li>'+n+'</li>').join('')+'</ul>';
+  document.getElementById('charts').appendChild(d);}
+function cardsBlock(cards){const d=document.createElement('div');d.className='cards';
+  d.innerHTML=cards.map(c=>{
+    if(c.last==null)return '<div class="card"><h4>'+c.title+'</h4><div class="big">-</div></div>';
+    return '<div class="card"><h4>'+c.title+'</h4><div class="big">'+c.last+'<span>'+c.unit+'</span></div>'+
+           '<div class="sub">peak '+c.max+' · avg '+c.avg+'</div></div>';}).join('');
+  document.getElementById('charts').appendChild(d);}
 
-const P=DATA.primary, S=DATA.standby;
-const C={lag:'#f85149',apply:'#2ea043',arr:'#4aa8ff',gap:'#d29922',util:'#bc8cff',cpu:'#ff7b72',rtt:'#56d4dd',retr:'#f0883e',wal:'#4aa8ff'};
+function initEngine(xfull){
+  setFull(xfull[0],xfull[1]);updateRange();
+  let rt;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(redrawAll,150);});}
+"""
 
-// --- STANDBY charts ---
-if(DATA.meta.standby_rows>0){
-  chartBlock('Replication Lag (time_lag)','Age of the last applied transaction. The core symptom.',
-    {yMax:null,series:[{name:'time_lag (s)',color:C.lag,data:S.time_lag}]});
-  chartBlock('Arrival vs Apply Rate','WAL received vs WAL applied. Apply < arrival = standby falling behind.',
-    {series:[{name:'arrival (MB/s)',color:C.arr,data:S.arrival},{name:'apply (MB/s)',color:C.apply,data:S.apply}]});
-  chartBlock('Apply Gap','WAL received but not yet applied. Growing = apply-bound.',
-    {series:[{name:'gap (MB)',color:C.gap,data:S.gap_mb}]});
-  chartBlock('Resource Saturation (standby)','Correlate lag spikes with disk / CPU redo.',
-    {yMax:100,series:[{name:'disk %util',color:C.util,data:S.disk_util},{name:'CPU redo %',color:C.cpu,data:S.cpu_startup}]});
-  chartBlock('Network Quality (replication socket)','RTT & retransmits on the walreceiver connection.',
-    {series:[{name:'rtt (ms)',color:C.rtt,data:S.rtt},{name:'retrans (total)',color:C.retr,data:S.retrans}]});
-  barBlock('Wait Event Distribution (redo process)','Where the startup process spends its time.',S.waitevents);
-}
+TOOLBAR = ('<div class="toolbar"><button onclick="resetView()">Reset zoom</button>'
+           '<span class="hint">scroll = zoom · drag = pan · double-click = reset · charts share one time window</span>'
+           '<span id="rangeReadout" class="range"></span></div>')
 
-// --- PRIMARY charts ---
-if(DATA.meta.primary_rows>0){
-  chartBlock('WAL Generation Rate (primary)','Spikes = batch/checkpoint. Compare against standby apply.',
-    {series:[{name:'WAL rate (MB/s)',color:C.wal,data:P.wal_rate}]});
-  const names=Object.keys(P.standbys);
-  if(names.length){
-    const pal=['#f85149','#4aa8ff','#2ea043','#d29922','#bc8cff'];
-    chartBlock('replay_lag per Standby (from primary)','Compare standbys side by side.',
-      {series:names.map((n,i)=>({name:n,color:pal[i%pal.length],data:P.standbys[n].replay_lag}))});
-    chartBlock('Total Lag per Standby (bytes)','Difference between sent and replay LSN per standby.',
-      {series:names.map((n,i)=>({name:n,color:pal[i%pal.length],data:P.standbys[n].total_lag_mb}))});
-  }
-}
-if(DATA.meta.primary_rows===0 && DATA.meta.standby_rows===0){
-  document.getElementById('charts').innerHTML='<div class="empty">No data. Ensure the sampler CSVs are populated.</div>';
-}
-window.addEventListener('resize',()=>location.reload());
+
+def nav(active):
+    items = [("dashboard.html", "Overview", "overview"),
+             ("dashboard-primary.html", "Primary", "primary"),
+             ("dashboard-standby.html", "Standby", "standby")]
+    return "<nav>" + "".join(
+        '<a class="%s" href="%s">%s</a>' % ("active" if key == active else "", href, label)
+        for href, label, key in items) + "</nav>"
+
+
+def shell(title, active, header_sub, body, init_js, data):
+    page = SHELL
+    return (page
+            .replace("__TITLE__", html.escape(title))
+            .replace("__CSS__", CSS)
+            .replace("__NAV__", nav(active))
+            .replace("__HEADER_SUB__", header_sub)
+            .replace("__BODY__", body)
+            .replace("__ENGINE__", ENGINE_JS)
+            .replace("__DATA__", json.dumps(data))
+            .replace("__INIT__", init_js))
+
+
+SHELL = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>__CSS__</style></head>
+<body>
+<header>
+  <h1>__TITLE__</h1>
+  <div class="meta">__HEADER_SUB__</div>
+  __NAV__
+</header>
+<div class="wrap">__BODY__</div>
+<footer>Self-contained · rendered offline with no external libraries</footer>
+<script>
+__ENGINE__
+const DATA = __DATA__;
+__INIT__
 </script>
 </body></html>"""
 
-out = (TEMPLATE
-    .replace("__DATA__", json.dumps(DATA))
-    .replace("__GEN__", html.escape(meta["generated"]))
-    .replace("__PROWS__", str(meta["primary_rows"]))
-    .replace("__SROWS__", str(meta["standby_rows"]))
-    .replace("__VCLASS__", vclass)
-    .replace("__VERDICT__", html.escape(verdict))
-    .replace("__NOTES__", notes_html)
-    .replace("__CARDS__", cards)
-    .replace("__BURSTS__", burst_html))
 
-out_dir = os.path.dirname(os.path.abspath(args.out))
+def header_sub():
+    cn = meta["cascade_nodes"]
+    casc = (" · cascade node(s): " + ", ".join(cn)) if cn else ""
+    return ("Generated %s · data window %s → %s · %d primary node(s), %d standby node(s)%s" % (
+        html.escape(meta["generated"]), html.escape(meta["span_from"]), html.escape(meta["span_to"]),
+        meta["primary_node_count"], meta["standby_node_count"], html.escape(casc)))
+
+
+def burst_list_html(bursts):
+    if not bursts:
+        return "<li>No burst incidents recorded.</li>"
+    return "".join('<li><b>%s</b> — %s</li>' % (html.escape(b["file"]), html.escape(b["head"])) for b in bursts)
+
+
+# --------------------------------------------------------------------------- #
+# Page: OVERVIEW (topology + global verdict + links)
+# --------------------------------------------------------------------------- #
+def render_overview():
+    # topology rows: each known node with its role pills + facts
+    nodes = {}
+    for n in primary_nodes:
+        e = nodes.setdefault(n["name"], {"roles": set(), "downstream": [], "wal": n["wal_summary"], "lag": None})
+        e["roles"].add("primary")
+        e["downstream"] = sorted(n["standbys"].keys())
+    for n in standby_nodes:
+        e = nodes.setdefault(n["name"], {"roles": set(), "downstream": [], "wal": None, "lag": None})
+        e["roles"].add("standby")
+        e["lag"] = summarize(n["time_lag"])["max"]
+
+    rows = []
+    for name in sorted(nodes):
+        e = nodes[name]
+        pills = ""
+        if "primary" in e["roles"] and "standby" in e["roles"]:
+            pills += '<span class="pill c">CASCADE</span>'
+        if "primary" in e["roles"]:
+            pills += '<span class="pill p">sends WAL</span>'
+        if "standby" in e["roles"]:
+            pills += '<span class="pill s">receives WAL</span>'
+        downstream = ", ".join(e["downstream"]) if e["downstream"] else "—"
+        wal = ("%.2f MB/s peak" % e["wal"]["max"]) if (e["wal"] and e["wal"]["max"] is not None) else "—"
+        lag = ("%.1f s peak" % e["lag"]) if e["lag"] is not None else "—"
+        rows.append("<tr><td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            html.escape(name), pills, html.escape(downstream), wal, lag))
+    topo = ("<table class='topo'><tr><th>Node</th><th>Role</th><th>Downstream standbys</th>"
+            "<th>WAL gen</th><th>Peak lag</th></tr>" + "".join(rows) + "</table>") if rows else \
+           "<div class='empty'>No node CSVs found. Point --metrics-dir at your sampler output.</div>"
+
+    casc_note = ""
+    if meta["cascade_nodes"]:
+        casc_note = ("<div class='verdict warn'>CASCADE topology detected: %s appears as both a WAL "
+                     "sender and receiver. Its <b>standby</b> view (lag from its upstream) is on the Standby "
+                     "dashboard; its <b>primary</b> view (lag to its downstream) is on the Primary dashboard.</div>"
+                     % html.escape(", ".join(meta["cascade_nodes"])))
+
+    body = (
+        '<div class="verdict %s">VERDICT: %s<ul>%s</ul></div>' % (
+            global_verdict["cls"], html.escape(global_verdict["text"]),
+            "".join("<li>%s</li>" % html.escape(n) for n in global_verdict["notes"])) +
+        casc_note +
+        "<h2>Topology</h2>" + topo +
+        '<div class="cards">'
+        '<div class="card"><h4>Primary nodes</h4><div class="big">%d</div></div>'
+        '<div class="card"><h4>Standby nodes</h4><div class="big">%d</div></div>'
+        '<div class="card"><h4>Primary incidents</h4><div class="big">%d</div></div>'
+        '<div class="card"><h4>Standby incidents</h4><div class="big">%d</div></div>'
+        '</div>' % (meta["primary_node_count"], meta["standby_node_count"],
+                    len(bursts_primary), len(bursts_standby)) +
+        '<div class="burst"><h3>Primary incidents (burst captures)</h3><ul>%s</ul></div>' % burst_list_html(bursts_primary) +
+        '<div class="burst"><h3>Standby incidents (burst captures)</h3><ul>%s</ul></div>' % burst_list_html(bursts_standby)
+    )
+    return shell("PostgreSQL Replication — Overview", "overview", header_sub(), body, "", {})
+
+
+# --------------------------------------------------------------------------- #
+# Page: PRIMARY
+# --------------------------------------------------------------------------- #
+def render_primary():
+    data = {"xfull": list(xfull),
+            "nodes": [{"name": n["name"], "cascade": n["cascade"], "rows": n["rows"],
+                       "wal_rate": n["wal_rate"],
+                       "standbys": n["standbys"]} for n in primary_nodes]}
+    init = r"""
+const PAL=['#f85149','#4aa8ff','#2ea043','#d29922','#bc8cff','#56d4dd','#f0883e'];
+if(!DATA.nodes.length){document.getElementById('charts').innerHTML='<div class="empty">No primary CSVs found.</div>';}
+DATA.nodes.forEach(n=>{
+  nodeHeader('Primary: '+n.name+'  ('+n.rows+' rows)', n.cascade?'CASCADE — also receives WAL (see Standby dashboard)':'');
+  chartBlock('WAL Generation Rate','Spikes = batch/checkpoint. Compare against each standby\'s apply rate.',
+    {series:[{name:'WAL rate (MB/s)',color:'#4aa8ff',data:n.wal_rate}]});
+  const names=Object.keys(n.standbys);
+  if(names.length){
+    chartBlock('replay_lag per downstream standby','Seconds the standby trails the primary. Compare standbys side by side.',
+      {series:names.map((s,i)=>({name:s,color:PAL[i%PAL.length],data:n.standbys[s].replay_lag}))});
+    chartBlock('Total lag per downstream standby (MB)','Bytes between sent and replayed LSN per standby.',
+      {series:names.map((s,i)=>({name:s,color:PAL[i%PAL.length],data:n.standbys[s].total_lag_mb}))});
+  }
+});
+initEngine(DATA.xfull);
+"""
+    body = TOOLBAR + '<div id="charts"></div>'
+    return shell("PostgreSQL Replication — Primary", "primary", header_sub(), body, init, data)
+
+
+# --------------------------------------------------------------------------- #
+# Page: STANDBY
+# --------------------------------------------------------------------------- #
+def render_standby():
+    data = {"xfull": list(xfull),
+            "nodes": [{
+                "name": n["name"], "cascade": n["cascade"], "rows": n["rows"],
+                "verdict": n["verdict"], "cards": n["cards"],
+                "time_lag": n["time_lag"], "arrival": n["arrival"], "apply": n["apply"],
+                "gap_mb": n["gap_mb"], "disk_util": n["disk_util"], "cpu_startup": n["cpu_startup"],
+                "rtt": n["rtt"], "retrans": n["retrans"], "waitevents": n["waitevents"],
+            } for n in standby_nodes]}
+    init = r"""
+const C={lag:'#f85149',apply:'#2ea043',arr:'#4aa8ff',gap:'#d29922',util:'#bc8cff',cpu:'#ff7b72',rtt:'#56d4dd',retr:'#f0883e'};
+if(!DATA.nodes.length){document.getElementById('charts').innerHTML='<div class="empty">No standby CSVs found.</div>';}
+DATA.nodes.forEach(n=>{
+  nodeHeader('Standby: '+n.name+'  ('+n.rows+' rows)', n.cascade?'CASCADE — also sends WAL (see Primary dashboard)':'');
+  verdictBlock(n.verdict);
+  cardsBlock(n.cards);
+  chartBlock('Replication Lag (time_lag)','Age of the last applied transaction. The core symptom.',
+    {yMax:null,series:[{name:'time_lag (s)',color:C.lag,data:n.time_lag}]});
+  chartBlock('Arrival vs Apply Rate','WAL received vs WAL applied. Apply < arrival = standby falling behind.',
+    {series:[{name:'arrival (MB/s)',color:C.arr,data:n.arrival},{name:'apply (MB/s)',color:C.apply,data:n.apply}]});
+  chartBlock('Apply Gap','WAL received but not yet applied. Growing = apply-bound.',
+    {series:[{name:'gap (MB)',color:C.gap,data:n.gap_mb}]});
+  chartBlock('Resource Saturation','Correlate lag spikes with disk %util and redo (startup) CPU.',
+    {yMax:100,series:[{name:'disk %util',color:C.util,data:n.disk_util},{name:'CPU redo %',color:C.cpu,data:n.cpu_startup}]});
+  chartBlock('Network Quality (replication socket)','RTT & cumulative retransmits on the walreceiver connection.',
+    {series:[{name:'rtt (ms)',color:C.rtt,data:n.rtt},{name:'retrans (total)',color:C.retr,data:n.retrans}]});
+  barBlock('Wait Event Distribution (redo process)','Where the startup process spends its time.',n.waitevents);
+});
+initEngine(DATA.xfull);
+"""
+    body = TOOLBAR + '<div id="charts"></div>'
+    return shell("PostgreSQL Replication — Standby", "standby", header_sub(), body, init, data)
+
+
+# --------------------------------------------------------------------------- #
+# Write the three pages
+# --------------------------------------------------------------------------- #
+out_index = args.out
+out_dir = os.path.dirname(os.path.abspath(out_index))
+stem = os.path.splitext(os.path.basename(out_index))[0]
+out_primary = os.path.join(out_dir, stem + "-primary.html")
+out_standby = os.path.join(out_dir, stem + "-standby.html")
 if out_dir:
     os.makedirs(out_dir, exist_ok=True)
-with open(args.out, "w") as f:
-    f.write(out)
-print("Dashboard generated: %s" % args.out)
-print("  primary rows: %d | standby rows: %d | bursts: %d" %
-      (meta["primary_rows"], meta["standby_rows"], len(bursts)))
+
+with open(out_index, "w", encoding="utf-8") as f:
+    f.write(render_overview())
+with open(out_primary, "w", encoding="utf-8") as f:
+    f.write(render_primary())
+with open(out_standby, "w", encoding="utf-8") as f:
+    f.write(render_standby())
+
+print("Dashboards generated:")
+print("  overview : %s" % out_index)
+print("  primary  : %s" % out_primary)
+print("  standby  : %s" % out_standby)
+print("  primary nodes: %d | standby nodes: %d | cascade: %s | bursts P/S: %d/%d" % (
+    meta["primary_node_count"], meta["standby_node_count"],
+    ", ".join(meta["cascade_nodes"]) or "none", len(bursts_primary), len(bursts_standby)))
