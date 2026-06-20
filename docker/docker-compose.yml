@@ -1,0 +1,92 @@
+# PostgreSQL 17 — 3-node cascading replication test cluster for pg-repl-diag.
+#
+#   pg-primary  ──streams──▶  pg-standby1  ──streams──▶  pg-standby2
+#   (PRIMARY)                 (local standby)            (remote DR standby)
+#
+# The whole repository is bind-mounted read/write at /opt/pg-repl-diag so the
+# toolkit runs INSIDE each node (where /proc, the TCP socket, and disk live) and
+# writes its output back to ./output on the host. Auth is `trust` — THIS IS A
+# THROWAWAY TEST CLUSTER, not a production template.
+name: pg-repl-diag-test
+
+x-pg-common: &pg-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: pg-repl-diag/pg17:latest
+  environment: &pg-env
+    POSTGRES_HOST_AUTH_METHOD: trust
+    POSTGRES_PASSWORD: postgres
+    PGDATA: /var/lib/postgresql/data
+    # Make the toolkit self-contained inside the container:
+    REPL_ENV_FILE: /opt/pg-repl-diag/repl.env.example   # use the committed template as the env file
+    OUTPUT_DIR: /opt/pg-repl-diag/output                # absolute, so cwd does not matter
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -h /var/run/postgresql -q || exit 1"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 10s
+  restart: unless-stopped
+
+services:
+  pg-primary:
+    <<: *pg-common
+    container_name: pg-primary
+    hostname: pg-primary
+    environment:
+      <<: *pg-env
+      TARGET: pg-standby1                 # `net-test` measures Primary -> standby1
+      PEERS: "pg-standby1 pg-standby2"    # `collect` measures RTT to both standbys
+    volumes:
+      - ../:/opt/pg-repl-diag
+      - pgdata-primary:/var/lib/postgresql/data
+      - ./primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+    ports:
+      - "5432:5432"
+
+  pg-standby1:
+    <<: *pg-common
+    container_name: pg-standby1
+    hostname: pg-standby1
+    entrypoint: ["bash", "/usr/local/bin/standby-entrypoint.sh"]
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      UPSTREAM_HOST: pg-primary
+      SLOT_NAME: standby1_slot
+      TARGET: pg-standby2                 # cascading: net-test standby1 -> standby2
+      PEERS: "pg-primary pg-standby2"
+    volumes:
+      - ../:/opt/pg-repl-diag
+      - pgdata-standby1:/var/lib/postgresql/data
+      - ./standby-entrypoint.sh:/usr/local/bin/standby-entrypoint.sh:ro
+    ports:
+      - "5433:5432"
+
+  pg-standby2:
+    <<: *pg-common
+    container_name: pg-standby2
+    hostname: pg-standby2
+    entrypoint: ["bash", "/usr/local/bin/standby-entrypoint.sh"]
+    depends_on:
+      pg-standby1:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      UPSTREAM_HOST: pg-standby1
+      SLOT_NAME: standby2_slot
+      PEERS: "pg-primary pg-standby1"
+    volumes:
+      - ../:/opt/pg-repl-diag
+      - pgdata-standby2:/var/lib/postgresql/data
+      - ./standby-entrypoint.sh:/usr/local/bin/standby-entrypoint.sh:ro
+    ports:
+      - "5434:5432"
+
+volumes:
+  pgdata-primary:
+  pgdata-standby1:
+  pgdata-standby2:
