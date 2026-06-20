@@ -22,6 +22,27 @@
 
 set -u
 
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+pg-repl-diag collect — static OS + PostgreSQL configuration snapshot (run on EVERY node)
+
+Usage:
+  pg-repl-diag collect                          # local node only
+  pg-repl-diag collect <peer-ip> [peer-ip...]   # also measure RTT to peers
+                                                # (overrides PEERS from repl.env)
+
+Strictly READ-ONLY. Writes one self-contained report to REPORTS_DIR. Passwords
+are redacted. The OS sections still work even when psql cannot connect.
+
+Key environment (repl.script.env / repl.env):
+  REPORTS_DIR   where the report is written
+  PEERS         default peer IPs for RTT when none are passed as arguments
+  PGDATABASE/PGPORT/PGHOST/PGUSER   libpq connection
+EOF
+    exit 0 ;;
+esac
+
 # Load central configuration (repl.script.env + repl.env) and validation helpers.
 # shellcheck source=../../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
@@ -126,7 +147,16 @@ else echo "(no chrony/ntp detected — ensure all three nodes share a synchroniz
 
 # ---------------------------------------------------------------------------
 sec "8. LIVE REPLICATION TCP SOCKET  (rtt, retransmits, cwnd from the real socket)"
-run "Socket :5432" sh -c "ss -tinp 2>/dev/null '( sport = :5432 or dport = :5432 )' | redact || echo '(none found / root required for PID)'"
+# NB: run this in the bash context (NOT via `run ... sh -c`) so the redact()
+# bash function is visible — sh -c spawns a new shell that does not inherit it.
+PORT="${PGPORT:-5432}"
+sub "Socket :${PORT}"
+if have ss; then
+    ss -tinp "( sport = :${PORT} or dport = :${PORT} )" 2>/dev/null | redact \
+        || echo "(none found / root required for PID)"
+else
+    echo "(ss not available)"
+fi
 run "Global retransmit counters" sh -c "netstat -s 2>/dev/null | grep -i -E 'retrans|segments' | head"
 
 # ---------------------------------------------------------------------------
