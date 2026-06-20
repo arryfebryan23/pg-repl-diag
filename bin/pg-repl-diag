@@ -11,6 +11,12 @@
 # itself via lib/repl_common.sh, so per-invocation overrides keep working, e.g.:
 #     INTERVAL=5 pg-repl-diag sample-standby
 # -----------------------------------------------------------------------------
+
+# The toolkit uses bash features (arrays, process substitution). If we were
+# started with sh/dash (e.g. `sh bin/pg-repl-diag ...`), re-exec under bash so
+# those don't blow up with a syntax error.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -u
 
 PROG="$(basename "$0")"
