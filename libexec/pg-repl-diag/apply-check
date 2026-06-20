@@ -64,10 +64,18 @@ esac
 require APPLY_INTERVAL
 require APPLY_COUNT
 require PGDATABASE
+require REPORTS_DIR "directory for the analysis report"
 
 INTERVAL="$APPLY_INTERVAL"
 COUNT="$APPLY_COUNT"
 PGDB="$PGDATABASE"
+
+# The ANALYSIS & verdict are written to a REPORT FILE for handover, NOT to stdout.
+# The terminal shows only the live samples table.
+TS="$(date +%Y%m%d_%H%M%S)"
+HOST="$(hostname 2>/dev/null || echo node)"
+ensure_dir "$REPORTS_DIR"
+REPORT="${REPORTS_DIR}/repl_applycheck_${HOST}_${TS}.txt"
 
 command -v psql    >/dev/null 2>&1 || die "psql is required."
 command -v python3 >/dev/null 2>&1 || die "python3 is required."
@@ -162,8 +170,13 @@ done
 rule '-'
 
 # ---------------------------------------------------------------------------
-# ANALYSIS & VERDICT
+# ANALYSIS & VERDICT  (written to the REPORT FILE, NOT to stdout)
 # ---------------------------------------------------------------------------
+(
+REPL_COLOR=never; __repl_init_colors    # clean ASCII (no ANSI) in the report file
+printf 'STANDBY APPLY-SIDE DIAGNOSIS — ANALYSIS REPORT\nHost      : %s\nTimestamp : %s\n' \
+    "$HOST" "$(date)"
+
 section "[ANALYSIS]"
 avg_arr="-"; avg_app="-"
 if [ "$n_rate" -gt 0 ]; then
@@ -212,3 +225,8 @@ subsection "Pair this with 'pg-repl-diag net-test' (Primary side) for the full p
 bullet "Network script says single-stream is sufficient BUT this is APPLY-BOUND -> focus on standby DISK/CPU."
 bullet "This script reports low arrival -> go back to the network."
 echo ""
+) > "$REPORT"
+
+ok   "Analysis report written: $REPORT"
+note "Stdout shows the live samples only; the verdict & recommendations are in the report."
+note "Submit the report for analysis."

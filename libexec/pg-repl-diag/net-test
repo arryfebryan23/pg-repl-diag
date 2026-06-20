@@ -66,8 +66,16 @@ require PARALLEL
 require LINK_MBPS
 require WAL_SAMPLE
 require PGDATABASE
+require REPORTS_DIR "directory for the analysis report"
 
 PGDB="$PGDATABASE"
+
+# The ANALYSIS & verdict are written to a REPORT FILE for handover, NOT to stdout.
+# The terminal shows only the live measurements (phases 1–5).
+TS="$(date +%Y%m%d_%H%M%S)"
+HOST="$(hostname 2>/dev/null || echo node)"
+ensure_dir "$REPORTS_DIR"
+REPORT="${REPORTS_DIR}/repl_nettest_${HOST}_${TS}.txt"
 
 command -v iperf3 >/dev/null 2>&1 || die "iperf3 is not installed. Install with: yum/apt install iperf3"
 command -v python3 >/dev/null 2>&1 || die "python3 is required to parse results"
@@ -171,8 +179,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# PHASE 6 — Analysis & verdict
+# PHASE 6 — Analysis & verdict  (written to the REPORT FILE, NOT to stdout)
 # ---------------------------------------------------------------------------
+(
+REPL_COLOR=never; __repl_init_colors    # clean ASCII (no ANSI) in the report file
+printf 'NETWORK DIAGNOSIS — ANALYSIS REPORT\nHost      : %s\nTimestamp : %s\nTarget    : %s\n' \
+    "$HOST" "$(date)" "$TARGET"
+
 section "[PHASE 6] ANALYSIS"
 
 # Bandwidth-Delay Product (the ideal TCP window)
@@ -285,3 +298,8 @@ else
     note "and compare against single-stream ${SINGLE_MBPS} Mbps."
 fi
 echo ""
+) > "$REPORT"
+
+ok   "Analysis report written: $REPORT"
+note "Stdout shows the measurements only; the verdict & recommendations are in the report."
+note "Submit the report for analysis."
