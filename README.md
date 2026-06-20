@@ -25,8 +25,8 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 │       ├── collect          # pg-repl-diag collect
 │       ├── net-test         # pg-repl-diag net-test
 │       ├── apply-check      # pg-repl-diag apply-check
-│       ├── sample-primary   # pg-repl-diag sample --role primary
-│       ├── sample-standby   # pg-repl-diag sample --role standby
+│       ├── sample-primary   # pg-repl-diag sample-primary
+│       ├── sample-standby   # pg-repl-diag sample-standby
 │       └── dashboard        # pg-repl-diag dashboard
 ├── lib/                 # shared library
 │   ├── repl_common.sh   # config loader + validation + per-run logging
@@ -65,8 +65,8 @@ the full list.
 | `pg-repl-diag collect` | every node | **one-time** | Static OS + DB configuration snapshot |
 | `pg-repl-diag net-test` | Primary | on-demand | Single-stream vs parallel test (iperf3) + WAL rate |
 | `pg-repl-diag apply-check` | Standby | on-demand | Monitor apply gap, wait events, disk, redo CPU |
-| `pg-repl-diag sample --role primary` | Primary | **periodic** | Sample lag & WAL rate → CSV + burst captures |
-| `pg-repl-diag sample --role standby` | Standby | **periodic** | Sample apply/network/disk/CPU → CSV + burst captures |
+| `pg-repl-diag sample-primary` | Primary | **periodic** | Sample lag & WAL rate → CSV + burst captures |
+| `pg-repl-diag sample-standby` | Standby | **periodic** | Sample apply/network/disk/CPU → CSV + burst captures |
 | `pg-repl-diag dashboard` | anywhere | offline | Convert CSV → interactive HTML dashboard |
 
 ---
@@ -81,7 +81,7 @@ $EDITOR repl.env          # adjust connection + topology for THIS node
 
 Both files are sourced by bash and use the `VAR="${VAR:-default}"` form, so any
 value already exported in the environment still takes precedence — per-invocation
-overrides keep working, e.g. `INTERVAL=5 pg-repl-diag sample --role standby`.
+overrides keep working, e.g. `INTERVAL=5 pg-repl-diag sample-standby`.
 
 **Environment** — site-specific (`repl.env`, from `repl.env.example`):
 
@@ -237,12 +237,12 @@ Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 
 **On the Primary:**
 ```bash
-nohup pg-repl-diag sample --role primary >/dev/null 2>&1 &   # console log -> output/log/
+nohup pg-repl-diag sample-primary >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 **On the remote standby:**
 ```bash
-nohup pg-repl-diag sample --role standby >/dev/null 2>&1 &   # console log -> output/log/
+nohup pg-repl-diag sample-standby >/dev/null 2>&1 &   # console log -> output/log/
 ```
 
 Raw output:
@@ -280,7 +280,7 @@ After=postgresql.service
 User=postgres
 WorkingDirectory=/opt/repl-diag
 Environment=REPL_ENV_FILE=/opt/repl-diag/repl.env
-ExecStart=/opt/repl-diag/bin/pg-repl-diag sample --role standby   ; use --role primary on the primary node
+ExecStart=/opt/repl-diag/bin/pg-repl-diag sample-standby   ; use sample-primary on the primary node
 Restart=always
 
 [Install]

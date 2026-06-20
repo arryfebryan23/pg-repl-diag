@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # libexec/pg-repl-diag/sample-standby  —  run ON THE STANDBY (background / systemd)
-# Invoked as: pg-repl-diag sample --role standby
+# Invoked as: pg-repl-diag sample-standby
 # -----------------------------------------------------------------------------
 # Periodically samples apply-side metrics into a RAW CSV under METRICS_DIR.
 # When time_lag exceeds the threshold, it performs a BURST CAPTURE under
@@ -14,8 +14,8 @@
 # CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 #
 # USAGE:
-#   pg-repl-diag sample --role standby
-#   nohup pg-repl-diag sample --role standby >/dev/null 2>&1 &
+#   pg-repl-diag sample-standby
+#   nohup pg-repl-diag sample-standby >/dev/null 2>&1 &
 #
 # Console output is mirrored automatically to a log file inside the project
 # (LOG_DIR, default output/log/sample-standby.log) — no /var/log needed.

@@ -9,7 +9,7 @@
 #
 # All tunables live in repl.env (see repl.env.example); each sub-command loads it
 # itself via lib/repl_common.sh, so per-invocation overrides keep working, e.g.:
-#     INTERVAL=5 pg-repl-diag sample --role standby
+#     INTERVAL=5 pg-repl-diag sample-standby
 # -----------------------------------------------------------------------------
 set -u
 
@@ -29,7 +29,8 @@ Commands:
   collect [peer-ip...]     Static OS + DB configuration snapshot (run on EVERY node)
   net-test [standby-ip]    Single-stream vs parallel link test       (run on the PRIMARY)
   apply-check              Apply-gap / wait-event / disk probe        (run on the STANDBY)
-  sample --role <r>        Periodic metrics sampler; r = primary | standby
+  sample-primary           Periodic metrics sampler                  (run on the PRIMARY)
+  sample-standby           Periodic metrics sampler                  (run on the STANDBY)
   dashboard [args...]      Render collected CSVs into an HTML dashboard
   version                  Print the toolkit version
   help                     Show this help
@@ -38,8 +39,8 @@ Examples:
   ${PROG} collect 10.0.0.2 10.0.0.3
   ${PROG} net-test 10.0.0.2                 # start 'iperf3 -s' on the standby first
   ${PROG} apply-check
-  INTERVAL=5 ${PROG} sample --role standby
-  nohup ${PROG} sample --role primary >/dev/null 2>&1 &
+  INTERVAL=5 ${PROG} sample-standby
+  nohup ${PROG} sample-primary >/dev/null 2>&1 &
   ${PROG} dashboard --out ./output/dashboards/dashboard.html
 
 Configuration: copy repl.env.example to repl.env and edit it (or set REPL_ENV_FILE).
@@ -50,27 +51,11 @@ cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 
 case "$cmd" in
-    collect)      exec "$LIBEXEC/collect"     "$@" ;;
-    net-test)     exec "$LIBEXEC/net-test"    "$@" ;;
-    apply-check)  exec "$LIBEXEC/apply-check" "$@" ;;
-
-    sample)
-        role=""
-        args=()
-        while [ "$#" -gt 0 ]; do
-            case "$1" in
-                --role)   role="${2:-}"; shift 2 ;;
-                --role=*) role="${1#*=}"; shift ;;
-                *)        args+=("$1"); shift ;;
-            esac
-        done
-        case "$role" in
-            primary) exec "$LIBEXEC/sample-primary" "${args[@]+"${args[@]}"}" ;;
-            standby) exec "$LIBEXEC/sample-standby" "${args[@]+"${args[@]}"}" ;;
-            "")  echo "${PROG} sample: --role is required (primary|standby)" >&2; exit 2 ;;
-            *)   echo "${PROG} sample: unknown role '$role' (expected primary|standby)" >&2; exit 2 ;;
-        esac
-        ;;
+    collect)         exec "$LIBEXEC/collect"        "$@" ;;
+    net-test)        exec "$LIBEXEC/net-test"       "$@" ;;
+    apply-check)     exec "$LIBEXEC/apply-check"    "$@" ;;
+    sample-primary)  exec "$LIBEXEC/sample-primary" "$@" ;;
+    sample-standby)  exec "$LIBEXEC/sample-standby" "$@" ;;
 
     dashboard)
         # The dashboard is a Python tool that reads METRICS_DIR/BURST_DIR/DASHBOARD_DIR
