@@ -88,7 +88,13 @@ redact(){
 PHASE=""
 exec 3>&1                                       # fd3 = terminal, used for progress
 prog(){ step "${PHASE:+[$PHASE] }$*" >&3; }     # progress on the terminal (shared style)
-sec(){ printf '\n========================================================================\n== %s\n========================================================================\n' "$*"; prog "$*"; }
+# sec "TITLE" ["explanation"] — the short TITLE goes to BOTH the report banner
+# and the terminal progress line; the optional explanation is written ONLY to
+# the report file, keeping the terminal progress concise.
+sec(){
+    printf '\n========================================================================\n== %s%s\n========================================================================\n' "$1" "${2:+  $2}"
+    prog "$1"
+}
 sub(){ printf '\n--- %s ---\n' "$*"; }
 run(){ # run "description" cmd...
     sub "$1"; shift
@@ -115,7 +121,7 @@ run "OS release"       cat /etc/os-release
 run "Uptime / load"    uptime
 
 # ---------------------------------------------------------------------------
-sec "2. CPU  (WAL replay is single-threaded; per-core clock speed is decisive)"
+sec "2. CPU" "(WAL replay is single-threaded; per-core clock speed is decisive)"
 if have lscpu; then run "lscpu" lscpu
 else run "cpuinfo" sh -c "grep -E 'model name|MHz|processor' /proc/cpuinfo | sort -u"; fi
 
@@ -127,14 +133,14 @@ run "Transparent huge pages" sh -c "cat /sys/kernel/mm/transparent_hugepage/enab
 run "VM sysctl"        sh -c "sysctl vm.swappiness vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_memory 2>/dev/null"
 
 # ---------------------------------------------------------------------------
-sec "4. STORAGE & FILESYSTEM  (governs apply throughput on the standby)"
+sec "4. STORAGE & FILESYSTEM" "(governs apply throughput on the standby)"
 run "Filesystem usage" df -hT
 if have lsblk; then run "Block devices" lsblk -o NAME,TYPE,SIZE,FSTYPE,ROTA,MOUNTPOINT,SCHED; fi
 run "I/O scheduler"    sh -c "for q in /sys/block/*/queue/scheduler; do echo \"\$q: \$(cat \$q)\"; done 2>/dev/null"
 run "Mount options"    sh -c "mount | grep -E 'ext4|xfs|zfs' "
 
 # ---------------------------------------------------------------------------
-sec "5. NETWORK — TCP SYSCTL  (core of single-stream throughput analysis)"
+sec "5. NETWORK — TCP SYSCTL" "(core of single-stream throughput analysis)"
 run "Active congestion control"    sh -c "sysctl net.ipv4.tcp_congestion_control"
 run "Available congestion control" sh -c "sysctl net.ipv4.tcp_available_congestion_control"
 run "Buffers & window scaling"     sh -c "sysctl net.core.rmem_max net.core.wmem_max \
@@ -156,14 +162,14 @@ if have ethtool; then
 else sub "ethtool"; echo "(ethtool not available)"; fi
 
 # ---------------------------------------------------------------------------
-sec "7. TIME / CLOCK SYNCHRONIZATION  (clock skew invalidates lag measurements)"
+sec "7. TIME / CLOCK SYNCHRONIZATION" "(clock skew invalidates lag measurements)"
 run "timedatectl" sh -c "timedatectl 2>/dev/null"
 if have chronyc; then run "chrony tracking" chronyc tracking
 elif have ntpq;  then run "ntpq peers" ntpq -p
 else echo "(no chrony/ntp detected — ensure all three nodes share a synchronized clock)"; fi
 
 # ---------------------------------------------------------------------------
-sec "8. LIVE REPLICATION TCP SOCKET  (rtt, retransmits, cwnd from the real socket)"
+sec "8. LIVE REPLICATION TCP SOCKET" "(rtt, retransmits, cwnd from the real socket)"
 # NB: run this in the bash context (NOT via `run ... sh -c`) so the redact()
 # bash function is visible — sh -c spawns a new shell that does not inherit it.
 PORT="${PGPORT:-5432}"
@@ -218,7 +224,7 @@ else
 fi
 
 if [ "$psql_ok" = "1" ]; then
-    sec "12. REPLICATION & WAL PARAMETERS  (listed explicitly, even when default)"
+    sec "12. REPLICATION & WAL PARAMETERS" "(listed explicitly, even when default)"
     $PSQL_T -c "
       SELECT name, setting, unit, source
       FROM pg_settings
@@ -232,7 +238,7 @@ if [ "$psql_ok" = "1" ]; then
         'wal_writer_delay','listen_addresses','max_connections'
       ) ORDER BY name;" 2>&1 | redact
 
-    sec "13. ALL NON-DEFAULT PARAMETERS  (intentionally overridden settings)"
+    sec "13. ALL NON-DEFAULT PARAMETERS" "(intentionally overridden settings)"
     $PSQL_T -c "
       SELECT name, setting, unit, source
       FROM pg_settings
@@ -282,7 +288,7 @@ if [ "$psql_ok" = "1" ]; then
                 FROM pg_database ORDER BY pg_database_size(datname) DESC LIMIT 15;" 2>&1
     $PSQL_T -c "SELECT extname, extversion FROM pg_extension ORDER BY 1;" 2>&1
 
-    sec "19. postgresql.auto.conf  (ALTER SYSTEM overrides; passwords redacted)"
+    sec "19. postgresql.auto.conf" "(ALTER SYSTEM overrides; passwords redacted)"
     AUTOCONF="$($PSQL_S -c 'SHOW data_directory;' 2>/dev/null)/postgresql.auto.conf"
     if [ -r "$AUTOCONF" ]; then cat "$AUTOCONF" | redact; else echo "(not readable: $AUTOCONF — run as the postgres user)"; fi
 fi
