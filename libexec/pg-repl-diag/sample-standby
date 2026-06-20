@@ -34,6 +34,7 @@ require COUNT
 require METRICS_DIR
 require BURST_DIR
 require PGDATABASE
+require PGPORT
 
 PGDB="$PGDATABASE"
 
@@ -62,10 +63,10 @@ iostat_peak() {
       NF>3 && u>0 { v=$u+0; if(v>m){m=v;d=$1;aw=(a?$a+0:(w?$w+0:0))} }
       END{ printf "%.1f %s %.1f", m+0,(d==""?"-":d),aw+0 }'
 }
-# rtt(ms) and total retransmits from the replication socket (walreceiver -> primary:5432)
+# rtt(ms) and total retransmits from the replication socket (walreceiver -> primary:$PGPORT)
 sock_info() {
     local out rtt retr
-    out="$(ss -tin state established '( dport = :5432 or sport = :5432 )' 2>/dev/null)"
+    out="$(ss -tin state established "( dport = :${PGPORT} or sport = :${PGPORT} )" 2>/dev/null)"
     rtt="$(echo "$out"  | grep -oE 'rtt:[0-9.]+'        | head -1 | cut -d: -f2)"
     retr="$(echo "$out" | grep -oE 'retrans:[0-9]+/[0-9]+' | head -1 | cut -d/ -f2)"
     echo "${rtt:--} ${retr:--}"
@@ -131,7 +132,7 @@ while :; do
             psql -d "$PGDB" -X -c "SELECT pid,backend_type,state,wait_event_type,wait_event,now()-query_start AS dur FROM pg_stat_activity ORDER BY backend_type;" 2>&1
             echo "--- iostat detail ---"; [ "$HAS_IOSTAT" = "1" ] && iostat -dxy 1 5 2>&1
             echo "--- per-core CPU ---"; command -v mpstat >/dev/null && mpstat -P ALL 1 3 2>&1
-            echo "--- replication socket ---"; ss -tinp '( dport = :5432 or sport = :5432 )' 2>&1 | sed -E 's/(password=)[^ ]*/\1***/Ig'
+            echo "--- replication socket ---"; ss -tinp "( dport = :${PGPORT} or sport = :${PGPORT} )" 2>&1 | sed -E 's/(password=)[^ ]*/\1***/Ig'
         } > "$BF"
         log_evt "burst captured -> $BF"
     fi
