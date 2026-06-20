@@ -174,7 +174,10 @@ def verdict_standby(sd, rowcount):
     s_arr = summarize(sd["arrival"]); s_app = summarize(sd["apply"])
     s_util = summarize(sd["disk_util"]); s_cpu = summarize(sd["cpu_startup"])
     retr = sd["retrans"]
-    retr_delta = (retr[-1]["y"] - retr[0]["y"]) if len(retr) >= 2 else None
+    # sock_retrans is a cumulative counter that RESETS when the walreceiver socket
+    # is re-established (restart/reconnect), so a raw end-start delta can go
+    # negative over a long window; clamp it to >= 0.
+    retr_delta = max(0.0, retr[-1]["y"] - retr[0]["y"]) if len(retr) >= 2 else None
 
     apply_slower = (s_arr["avg"] is not None and s_app["avg"] is not None
                     and s_app["avg"] < s_arr["avg"] * 0.9)
