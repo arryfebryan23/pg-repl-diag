@@ -65,14 +65,29 @@ HOST="$(hostname 2>/dev/null || echo node)"
 ensure_dir "$REPORTS_DIR"
 OUT="${REPORTS_DIR}/repl_collect_${HOST}_${TS}.txt"
 
+# Cap how long psql waits for a connection so a dead/hung server never blocks
+# the whole collector. Honour an externally provided value if present.
+export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}"
+
 PSQL_S="psql -d ${PGDB} -X -At -q"            # scalar query helper
 PSQL_T="psql -d ${PGDB} -X -q -P pager=off"   # tabular query helper
 
 have(){ command -v "$1" >/dev/null 2>&1; }
-redact(){ sed -E 's/(password[[:space:]]*=[[:space:]]*)[^[:space:]"'"'"']+/\1***REDACTED***/Ig'; }
+# redact — strip secrets before anything reaches the report. Two patterns:
+#   1. key/value form:  password = <secret>   (also PGPASSWORD, sslpassword; case-insensitive)
+#   2. connection URI:  scheme://user:<secret>@host
+redact(){
+    sed -E '
+      s/(password[[:space:]]*=[[:space:]]*)[^[:space:]"'"'"']+/\1***REDACTED***/Ig
+      s#(://[^:@/[:space:]]+:)[^@/[:space:]]+@#\1***REDACTED***@#g
+    '
+}
 
+# PHASE labels the terminal progress so it is obvious which half is running
+# (OS vs PostgreSQL). collect_os / collect_db set it; prog() prepends it.
+PHASE=""
 exec 3>&1                                       # fd3 = terminal, used for progress
-prog(){ step "$*" >&3; }                        # progress on the terminal (shared style)
+prog(){ step "${PHASE:+[$PHASE] }$*" >&3; }     # progress on the terminal (shared style)
 sec(){ printf '\n========================================================================\n== %s\n========================================================================\n' "$*"; prog "$*"; }
 sub(){ printf '\n--- %s ---\n' "$*"; }
 run(){ # run "description" cmd...
@@ -86,10 +101,12 @@ run(){ # run "description" cmd...
 psql_ok=0
 
 # ============================================================================
-collect() {
-
-printf 'REPLICATION DIAGNOSTICS — STATIC CONFIGURATION REPORT\nHost      : %s\nTimestamp : %s\nUser      : %s\n' \
-    "$HOST" "$(date)" "$(whoami)"
+# collect_os — OS / kernel / CPU / memory / storage / network / time config.
+# Self-contained: needs NO database connectivity, so it stays useful even when
+# psql cannot connect. Covers sections 1–10.
+# ============================================================================
+collect_os() {
+PHASE="OS"
 
 # ---------------------------------------------------------------------------
 sec "1. OPERATING SYSTEM & KERNEL"
@@ -172,6 +189,16 @@ fi
 # ---------------------------------------------------------------------------
 sec "10. RESOURCE LIMITS"
 run "ulimit" sh -c "ulimit -a"
+}
+
+# ============================================================================
+# collect_db — PostgreSQL identity, replication/WAL parameters, slots, stats.
+# Sets the shared globals psql_ok / ROLE. Skips gracefully (with a clear note)
+# when psql cannot connect; the OS report from collect_os remains useful on its
+# own. Covers sections 11–19.
+# ============================================================================
+collect_db() {
+PHASE="PostgreSQL"
 
 # ===========================================================================
 #  POSTGRESQL
@@ -260,7 +287,19 @@ if [ "$psql_ok" = "1" ]; then
     if [ -r "$AUTOCONF" ]; then cat "$AUTOCONF" | redact; else echo "(not readable: $AUTOCONF — run as the postgres user)"; fi
 fi
 
-printf '\n======================== END OF REPORT ========================\n'
+}
+
+# ============================================================================
+# collect — orchestrator: report header, then the OS and PostgreSQL sections
+# in order, producing ONE self-contained report (handover-friendly). The two
+# halves live in collect_os / collect_db; this only sequences them.
+# ============================================================================
+collect() {
+    printf 'REPLICATION DIAGNOSTICS — STATIC CONFIGURATION REPORT\nHost      : %s\nTimestamp : %s\nUser      : %s\n' \
+        "$HOST" "$(date)" "$(whoami)"
+    collect_os   # sections 1–10  (no DB required)
+    collect_db   # sections 11–19 (skips itself if psql cannot connect)
+    printf '\n======================== END OF REPORT ========================\n'
 }
 
 # ============================================================================
