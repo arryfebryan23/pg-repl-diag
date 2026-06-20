@@ -65,7 +65,7 @@ iostat_peak() {
 # rtt(ms) and total retransmits from the replication socket (walreceiver -> primary:5432)
 sock_info() {
     local out rtt retr
-    out="$(ss -tin '( dport = :5432 or sport = :5432 )' 2>/dev/null state established)"
+    out="$(ss -tin state established '( dport = :5432 or sport = :5432 )' 2>/dev/null)"
     rtt="$(echo "$out"  | grep -oE 'rtt:[0-9.]+'        | head -1 | cut -d: -f2)"
     retr="$(echo "$out" | grep -oE 'retrans:[0-9]+/[0-9]+' | head -1 | cut -d/ -f2)"
     echo "${rtt:--} ${retr:--}"
