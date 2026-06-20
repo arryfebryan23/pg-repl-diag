@@ -8,10 +8,13 @@ No external dependencies (standard library only). Charts are drawn with inline
 vanilla-JS canvas code, so the resulting HTML is 100% offline and safe to open
 on air-gapped servers.
 
-OUTPUT — three self-contained pages (derived from --out, default dashboard.html):
-  dashboard.html           Overview: topology, roles, global verdict, links
-  dashboard-primary.html   PRIMARY side: WAL rate + per-standby replication lag
-  dashboard-standby.html   STANDBY side: apply/gap/disk/CPU/RTT + wait events
+OUTPUT — three self-contained pages (derived from --out). By default --out is a
+timestamped dashboard-<YYYYmmdd_HHMMSS>.html, so each run is kept side by side
+instead of overwriting the previous one; pass --out dashboard.html for a fixed,
+overwriting name. The stem drives the other two page names:
+  <stem>.html           Overview: topology, roles, global verdict, links
+  <stem>-primary.html   PRIMARY side: WAL rate + per-standby replication lag
+  <stem>-standby.html   STANDBY side: apply/gap/disk/CPU/RTT + wait events
 
 FEATURES:
   * Zoom & pan the time axis — scroll to zoom, drag to pan, double-click to reset.
@@ -235,9 +238,24 @@ ap.add_argument("--metrics-dir", default=DEF_METRICS, help="directory containing
 ap.add_argument("--burst-dir", default=DEF_BURST, help="directory containing burst_*.txt")
 ap.add_argument("--primary", default=None, help="explicit path to a single primary_metrics.csv (node 'local')")
 ap.add_argument("--standby", default=None, help="explicit path to a single standby_metrics.csv (node 'local')")
-ap.add_argument("--out", default=os.path.join(DEF_DASHBOARD, "dashboard.html"),
-                help="overview page path; the -primary/-standby pages are written alongside it")
+ap.add_argument("--out", default=None,
+                help="overview page path; the -primary/-standby pages are written alongside it. "
+                     "Default: a timestamped dashboard-<YYYYmmdd_HHMMSS>.html in DASHBOARD_DIR, so "
+                     "each run is kept instead of overwriting the previous one. Pass an explicit "
+                     "--out (e.g. dashboard.html) to write a fixed, overwriting filename.")
 args = ap.parse_args()
+
+# Default to a timestamped filename so repeated runs do not clobber earlier
+# dashboards; an explicit --out keeps the exact (overwriting) name the user asked for.
+if args.out is None:
+    args.out = os.path.join(DEF_DASHBOARD, "dashboard-%s.html" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+# Cross-page nav links must point at THIS run's actual filenames (which carry the
+# timestamp), not the fixed dashboard*.html names.
+_nav_stem  = os.path.splitext(os.path.basename(args.out))[0]
+NAV_INDEX   = os.path.basename(args.out)
+NAV_PRIMARY = _nav_stem + "-primary.html"
+NAV_STANDBY = _nav_stem + "-standby.html"
 
 if args.primary or args.standby:
     primary_files = {"primary": args.primary} if args.primary else {}
@@ -505,9 +523,9 @@ TOOLBAR = ('<div class="toolbar"><button onclick="resetView()">Reset zoom</butto
 
 
 def nav(active):
-    items = [("dashboard.html", "Overview", "overview"),
-             ("dashboard-primary.html", "Primary", "primary"),
-             ("dashboard-standby.html", "Standby", "standby")]
+    items = [(NAV_INDEX, "Overview", "overview"),
+             (NAV_PRIMARY, "Primary", "primary"),
+             (NAV_STANDBY, "Standby", "standby")]
     return "<nav>" + "".join(
         '<a class="%s" href="%s">%s</a>' % ("active" if key == active else "", href, label)
         for href, label, key in items) + "</nav>"
