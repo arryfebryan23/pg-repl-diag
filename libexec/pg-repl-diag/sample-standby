@@ -11,7 +11,7 @@
 #   $METRICS_DIR/[<prefix>_]standby_metrics.csv
 #   $BURST_DIR/burst_standby_[<prefix>_]<ts>.txt
 #
-# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.conf, environment in repl.env (see repl.env.example).
 #
 # USAGE:
 #   pg-repl-diag sample-standby
@@ -26,19 +26,31 @@
 # -----------------------------------------------------------------------------
 set -u
 
+# This script's own location: the lock and PID files live RIGHT HERE next to the
+# sampler, and 'start' re-launches the daemon from this same path.
+SELF="${BASH_SOURCE[0]}"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
 case "${1:-}" in
   -h|--help)
     cat <<'EOF'
 pg-repl-diag sample-standby — periodic apply-side metrics sampler (run ON THE STANDBY)
 
 Usage:
-  pg-repl-diag sample-standby
-  nohup pg-repl-diag sample-standby >/dev/null 2>&1 &
+  pg-repl-diag sample-standby [run]      run in the foreground (Ctrl-C to stop)
+  pg-repl-diag sample-standby start      start as a background daemon
+  pg-repl-diag sample-standby stop       stop the background daemon
+  pg-repl-diag sample-standby restart    restart the background daemon
+  pg-repl-diag sample-standby status     report whether the daemon is running
+
+Only ONE instance may run per node: an advisory lock file kept next to this
+script (.<output>_standby_metrics.lock) is held for the sampler's lifetime, and
+start/stop manage it together with a sibling .pid file.
 
 Appends a CSV row every INTERVAL seconds and writes a detailed burst capture
 whenever time_lag exceeds THRESHOLD_LAG_S. Restart-safe (append + header guard).
 
-Key environment (repl.script.env / repl.env, all overridable per invocation):
+Key environment (repl.script.conf / repl.env, all overridable per invocation):
   INTERVAL          seconds between samples (default 10; real cadence +~1s for iostat)
   THRESHOLD_LAG_S   time_lag (s) that triggers a burst capture (default 30)
   BURST_COOLDOWN    minimum seconds between bursts (default 120)
@@ -49,12 +61,12 @@ Key environment (repl.script.env / repl.env, all overridable per invocation):
   PGDATABASE/PGPORT libpq connection (PGHOST/PGUSER via env or ~/.pgpass)
 
 Example:
-  INTERVAL=5 pg-repl-diag sample-standby
+  INTERVAL=5 pg-repl-diag sample-standby start
 EOF
     exit 0 ;;
 esac
 
-# Load central configuration (repl.script.env + repl.env) and validation helpers.
+# Load central configuration (repl.script.conf + repl.env) and validation helpers.
 # shellcheck source=../../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 
@@ -69,12 +81,23 @@ require PGDATABASE
 require PGPORT
 
 PGDB="$PGDATABASE"
-MPFX="${METRICS_PREFIX:-}"            # optional per-node tag (see repl.script.env)
+MPFX="${METRICS_PREFIX:-}"            # optional per-node tag (see repl.script.conf)
 
 PSQL="psql -d ${PGDB} -X -At -q -F|"
 CSV="${METRICS_DIR}/${MPFX:+${MPFX}_}standby_metrics.csv"
+NAME="$(basename "$CSV" .csv)"   # lock/pid basename — unique per node/output file
+
+# start | stop | restart | status are handled by the shared daemon controller;
+# a bare invocation (or 'run', used internally by 'start') falls through to the
+# foreground sampling loop below.
+case "${1:-run}" in
+  start|stop|restart|status)
+    daemon_dispatch "$1" "$NAME" "STANDBY SAMPLER" "$SELF" "$SELF_DIR"
+    exit $? ;;
+esac
+
 ensure_dir "$METRICS_DIR" "$BURST_DIR"
-single_instance "$(basename "$CSV" .csv)"   # one sampler per node/output file
+single_instance "$NAME" "$SELF_DIR"   # one sampler per node/output file
 CLK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
 
 command -v psql >/dev/null 2>&1 || die "psql not found"

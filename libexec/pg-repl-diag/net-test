@@ -11,7 +11,7 @@
 #     - iperf3, 1 stream   -> mirrors real replication behaviour
 #     - iperf3, N streams  -> measures the true capacity of the link
 #
-# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.conf, environment in repl.env (see repl.env.example).
 # TARGET is mandatory; the run aborts if it is not set.
 #
 # USAGE:
@@ -38,7 +38,7 @@ The standby-ip argument overrides TARGET from repl.env. Compares 1-stream
 throughput (mirrors replication) against N-stream throughput (true link
 capacity), measures RTT/loss, samples the WAL rate, and prints a tuning verdict.
 
-Key environment (repl.script.env / repl.env):
+Key environment (repl.script.conf / repl.env):
   TARGET        standby IP running 'iperf3 -s' (REQUIRED; or pass as argument)
   IPERF_PORT    iperf3 server port (default 5201)
   DURATION      seconds per iperf3 test (default 20)
@@ -50,7 +50,7 @@ EOF
     exit 0 ;;
 esac
 
-# Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
+# Load central configuration (repl.script.conf + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
 # shellcheck source=../../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"

@@ -9,7 +9,7 @@
 # outputs can be compared side by side. It produces a single self-contained
 # .txt report under REPORTS_DIR, suitable for handover to an analyst or vendor.
 #
-# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.conf, environment in repl.env (see repl.env.example).
 #
 # USAGE:
 #   pg-repl-diag collect                          # collect local node only
@@ -35,7 +35,7 @@ Usage:
 Strictly READ-ONLY. Writes one self-contained report to REPORTS_DIR. Passwords
 are redacted. The OS sections still work even when psql cannot connect.
 
-Key environment (repl.script.env / repl.env):
+Key environment (repl.script.conf / repl.env):
   REPORTS_DIR   where the report is written
   PEERS         default peer IPs for RTT when none are passed as arguments
   PGDATABASE/PGPORT/PGHOST/PGUSER   libpq connection
@@ -43,7 +43,7 @@ EOF
     exit 0 ;;
 esac
 
-# Load central configuration (repl.script.env + repl.env) and validation helpers.
+# Load central configuration (repl.script.conf + repl.env) and validation helpers.
 # shellcheck source=../../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
 

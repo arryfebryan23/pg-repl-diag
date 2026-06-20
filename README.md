@@ -15,7 +15,7 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 
 ```
 .
-├── repl.script.env      # SCRIPT/toolkit behaviour: output, logging, cadence, appearance (committed)
+├── repl.script.conf      # SCRIPT/toolkit behaviour: output, logging, cadence, appearance (committed)
 ├── repl.env.example     # ENVIRONMENT template: PostgreSQL/OS/topology (committed)
 ├── repl.env             # your local environment config (git-ignored; copy of the example)
 ├── bin/                 # single entry point (put this dir on PATH)
@@ -43,7 +43,7 @@ Configuration is split by concern across **two** files, both loaded via
 `lib/repl_common.sh`, which **aborts** if a variable an operation depends on is
 missing:
 
-- **`repl.script.env`** — *script / toolkit behaviour* (output dirs, logging,
+- **`repl.script.conf`** — *script / toolkit behaviour* (output dirs, logging,
   sampling cadence, thresholds, console appearance). Identical on every node and
   committed to git.
 - **`repl.env`** — *deployment environment* (PostgreSQL connection, target /
@@ -76,7 +76,7 @@ the full list.
 ```bash
 cp repl.env.example repl.env
 $EDITOR repl.env          # adjust connection + topology for THIS node
-# (toolkit behaviour lives in repl.script.env and rarely needs changes)
+# (toolkit behaviour lives in repl.script.conf and rarely needs changes)
 ```
 
 Both files are sourced by bash and use the `VAR="${VAR:-default}"` form, so any
@@ -92,7 +92,7 @@ overrides keep working, e.g. `INTERVAL=5 pg-repl-diag sample-standby`.
 | `LINK_MBPS` | 1000 | this link's per-direction bandwidth (Mbps), for the BDP calc |
 | `PEERS` | *(empty, optional)* | space-separated peer IPs for RTT in the collector |
 
-**Script / toolkit** — same on every node (`repl.script.env`):
+**Script / toolkit** — same on every node (`repl.script.conf`):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -237,13 +237,21 @@ Output: `output/reports/repl_collect_<host>_<ts>.txt` (passwords auto-redacted).
 
 **On the Primary:**
 ```bash
-nohup pg-repl-diag sample-primary >/dev/null 2>&1 &   # console log -> output/log/
+pg-repl-diag sample-primary start     # background daemon; console log -> output/log/
+pg-repl-diag sample-primary status    # running? | stop with: ... sample-primary stop
 ```
 
 **On the remote standby:**
 ```bash
-nohup pg-repl-diag sample-standby >/dev/null 2>&1 &   # console log -> output/log/
+pg-repl-diag sample-standby start     # background daemon; console log -> output/log/
+pg-repl-diag sample-standby status    # running? | stop with: ... sample-standby stop
 ```
+
+`start` is restart-safe and self-guarding: a lock file kept next to the sampler
+(`libexec/pg-repl-diag/.<output>_metrics.lock`, alongside a `.pid`) ensures only
+**one** instance runs per node — a second `start`, or a stray foreground run, is
+refused. You can still run it in the foreground for an interactive session by
+omitting the action (`pg-repl-diag sample-standby`, Ctrl-C to stop).
 
 Raw output:
 - `output/metrics/primary_metrics.csv`, `output/metrics/standby_metrics.csv` (append, restart-safe)

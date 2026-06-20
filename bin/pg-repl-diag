@@ -35,8 +35,10 @@ Commands:
   collect [peer-ip...]     Static OS + DB configuration snapshot (run on EVERY node)
   net-test [standby-ip]    Single-stream vs parallel link test       (run on the PRIMARY)
   apply-check              Apply-gap / wait-event / disk probe        (run on the STANDBY)
-  sample-primary           Periodic metrics sampler                  (run on the PRIMARY)
-  sample-standby           Periodic metrics sampler                  (run on the STANDBY)
+  sample-primary [action]  Periodic metrics sampler                  (run on the PRIMARY)
+  sample-standby [action]  Periodic metrics sampler                  (run on the STANDBY)
+                           action = start|stop|restart|status (background daemon);
+                           omit it to run in the foreground
   dashboard [args...]      Render collected CSVs into an HTML dashboard
   version                  Print the toolkit version
   help                     Show this help
@@ -45,8 +47,8 @@ Examples:
   ${PROG} collect 10.0.0.2 10.0.0.3
   ${PROG} net-test 10.0.0.2                 # start 'iperf3 -s' on the standby first
   ${PROG} apply-check
-  INTERVAL=5 ${PROG} sample-standby
-  nohup ${PROG} sample-primary >/dev/null 2>&1 &
+  INTERVAL=5 ${PROG} sample-standby start    # background daemon (one per node)
+  ${PROG} sample-standby status              # check it / ${PROG} sample-standby stop
   ${PROG} dashboard --out ./output/dashboards/dashboard.html
 
 Configuration: copy repl.env.example to repl.env and edit it (or set REPL_ENV_FILE).

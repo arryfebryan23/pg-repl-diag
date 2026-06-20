@@ -8,3 +8,7 @@ repl.env
 
 # All runtime output (metrics, reports, bursts, dashboards)
 output/
+
+# Sampler daemon control files (lock + pid live next to the sampler scripts)
+libexec/pg-repl-diag/.*.lock
+libexec/pg-repl-diag/.*.pid

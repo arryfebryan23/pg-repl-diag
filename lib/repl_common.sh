@@ -5,7 +5,7 @@
 # Shared configuration loader and validation helpers for the toolkit.
 #
 # Every script under bin/ sources this file. It loads the two configuration
-# files (repl.script.env for toolkit behaviour, repl.env for the environment)
+# files (repl.script.conf for toolkit behaviour, repl.env for the environment)
 # and exposes require()/require_all() so that any operation which depends on a
 # variable can abort cleanly when that variable is not set.
 # This file is meant to be SOURCED, not executed directly.
@@ -16,20 +16,20 @@ __REPL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 __REPL_ROOT="$(cd "$__REPL_LIB_DIR/.." && pwd)"
 
 # Configuration is split across TWO files, by concern:
-#   1. repl.script.env  — toolkit / script behaviour (output dirs, logging,
+#   1. repl.script.conf — toolkit / script behaviour (output dirs, logging,
 #      sampling cadence, thresholds, console appearance). Ships with the repo
 #      and is the same on every node.
 #   2. repl.env         — deployment environment (PostgreSQL connection, target
 #      standby / peer IPs, link bandwidth). Site-specific; copied from
 #      repl.env.example and git-ignored.
-# Override either location with REPL_SCRIPT_ENV_FILE / REPL_ENV_FILE.
-REPL_SCRIPT_ENV_FILE="${REPL_SCRIPT_ENV_FILE:-${__REPL_ROOT}/repl.script.env}"
+# Override either location with REPL_SCRIPT_CONF_FILE / REPL_ENV_FILE.
+REPL_SCRIPT_CONF_FILE="${REPL_SCRIPT_CONF_FILE:-${__REPL_ROOT}/repl.script.conf}"
 REPL_ENV_FILE="${REPL_ENV_FILE:-${__REPL_ROOT}/repl.env}"
 
-if [ ! -f "$REPL_SCRIPT_ENV_FILE" ]; then
-    echo "ERROR: script configuration file not found: $REPL_SCRIPT_ENV_FILE" >&2
+if [ ! -f "$REPL_SCRIPT_CONF_FILE" ]; then
+    echo "ERROR: script configuration file not found: $REPL_SCRIPT_CONF_FILE" >&2
     echo "       This file ships with the toolkit; restore it from version control" >&2
-    echo "       or set REPL_SCRIPT_ENV_FILE. Operation aborted." >&2
+    echo "       or set REPL_SCRIPT_CONF_FILE. Operation aborted." >&2
     exit 1
 fi
 if [ ! -f "$REPL_ENV_FILE" ]; then
@@ -45,7 +45,7 @@ fi
 # then the site environment.
 set -a
 # shellcheck source=/dev/null
-. "$REPL_SCRIPT_ENV_FILE"
+. "$REPL_SCRIPT_CONF_FILE"
 # shellcheck source=/dev/null
 . "$REPL_ENV_FILE"
 set +a
@@ -57,6 +57,13 @@ set +a
 # shellcheck source=./repl_format.sh
 if [ -f "${__REPL_LIB_DIR}/repl_format.sh" ]; then
     . "${__REPL_LIB_DIR}/repl_format.sh"
+fi
+
+# Background-daemon control (start/stop/restart/status) for the long-running
+# samplers. Sourced after the format layer so its handlers can log/colorise.
+# shellcheck source=./repl_daemon.sh
+if [ -f "${__REPL_LIB_DIR}/repl_daemon.sh" ]; then
+    . "${__REPL_LIB_DIR}/repl_daemon.sh"
 fi
 
 # require VAR ["description"] — abort the operation if VAR is empty or unset.
@@ -93,16 +100,17 @@ iostat_peak() {
       END{ printf "%.1f %s %.1f", m+0,(d==""?"-":d),aw+0 }'
 }
 
-# single_instance NAME — guarantee only ONE copy of a long-running command runs.
-# Takes a non-blocking flock on a per-NAME lockfile under LOG_DIR and aborts if it
-# is already held (e.g. a forgotten background sampler). The lock is released
-# automatically when the process exits (fd 9 stays open for its lifetime).
+# single_instance NAME [DIR] — guarantee only ONE copy of a long-running command runs.
+# Takes a non-blocking flock on a per-NAME lockfile (in DIR, default LOG_DIR) and
+# aborts if it is already held (e.g. a forgotten background sampler). The lock is
+# released automatically when the process exits (fd 9 stays open for its lifetime).
 # Best-effort: if flock is unavailable the guard is skipped silently.
 # Pass a NAME that is UNIQUE PER NODE (e.g. the CSV basename) so that nodes sharing
-# a bind-mounted lock directory do not block each other.
+# a bind-mounted lock directory do not block each other. DIR lets the start/stop
+# controller (repl_daemon.sh) point this at the same lock it manages.
 single_instance() {
     local name="$1"
-    local dir="${LOG_DIR:-${OUTPUT_DIR:-/tmp}}"
+    local dir="${2:-${LOG_DIR:-${OUTPUT_DIR:-/tmp}}}"
     mkdir -p "$dir" 2>/dev/null || dir="/tmp"
     local lock="${dir}/.${name}.lock"
     command -v flock >/dev/null 2>&1 || return 0

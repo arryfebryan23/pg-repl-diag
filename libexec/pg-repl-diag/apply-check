@@ -21,7 +21,7 @@
 #   - wait_event   : what the startup process is waiting on (I/O? conflict?)
 #   - disk %util   : utilization of the busiest disk (via iostat)
 #
-# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.conf, environment in repl.env (see repl.env.example).
 # Cadence is controlled by APPLY_INTERVAL / APPLY_COUNT.
 #
 # USAGE (on the standby):
@@ -47,7 +47,7 @@ Samples receive/replay LSN, apply gap, arrival vs apply rate, startup wait event
 and disk %util for APPLY_COUNT iterations, then prints a verdict (APPLY-BOUND on
 disk/CPU/conflict, NETWORK-bound, or HEALTHY). Read-only.
 
-Key environment (repl.script.env / repl.env, overridable per invocation):
+Key environment (repl.script.conf / repl.env, overridable per invocation):
   APPLY_INTERVAL    seconds between samples (default 5; real spacing +~1s for iostat)
   APPLY_COUNT       number of samples (default 12 -> ~1 minute)
   PGDATABASE        libpq connection (PGHOST/PGPORT/PGUSER via env or ~/.pgpass)
@@ -55,7 +55,7 @@ EOF
     exit 0 ;;
 esac
 
-# Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
+# Load central configuration (repl.script.conf + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
 # shellcheck source=../../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/repl_common.sh"
