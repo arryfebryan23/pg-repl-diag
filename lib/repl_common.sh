@@ -4,9 +4,10 @@
 # -----------------------------------------------------------------------------
 # Shared configuration loader and validation helpers for the toolkit.
 #
-# Every script under bin/ sources this file. It loads the central configuration
-# file (repl.env) and exposes require()/require_all() so that any operation
-# which depends on a variable can abort cleanly when that variable is not set.
+# Every script under bin/ sources this file. It loads the two configuration
+# files (repl.script.env for toolkit behaviour, repl.env for the environment)
+# and exposes require()/require_all() so that any operation which depends on a
+# variable can abort cleanly when that variable is not set.
 # This file is meant to be SOURCED, not executed directly.
 # -----------------------------------------------------------------------------
 
@@ -14,20 +15,37 @@
 __REPL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 __REPL_ROOT="$(cd "$__REPL_LIB_DIR/.." && pwd)"
 
-# Central configuration file. Override its location by exporting REPL_ENV_FILE.
+# Configuration is split across TWO files, by concern:
+#   1. repl.script.env  — toolkit / script behaviour (output dirs, logging,
+#      sampling cadence, thresholds, console appearance). Ships with the repo
+#      and is the same on every node.
+#   2. repl.env         — deployment environment (PostgreSQL connection, target
+#      standby / peer IPs, link bandwidth). Site-specific; copied from
+#      repl.env.example and git-ignored.
+# Override either location with REPL_SCRIPT_ENV_FILE / REPL_ENV_FILE.
+REPL_SCRIPT_ENV_FILE="${REPL_SCRIPT_ENV_FILE:-${__REPL_ROOT}/repl.script.env}"
 REPL_ENV_FILE="${REPL_ENV_FILE:-${__REPL_ROOT}/repl.env}"
 
+if [ ! -f "$REPL_SCRIPT_ENV_FILE" ]; then
+    echo "ERROR: script configuration file not found: $REPL_SCRIPT_ENV_FILE" >&2
+    echo "       This file ships with the toolkit; restore it from version control" >&2
+    echo "       or set REPL_SCRIPT_ENV_FILE. Operation aborted." >&2
+    exit 1
+fi
 if [ ! -f "$REPL_ENV_FILE" ]; then
-    echo "ERROR: configuration file not found: $REPL_ENV_FILE" >&2
+    echo "ERROR: environment configuration file not found: $REPL_ENV_FILE" >&2
     echo "       Copy 'repl.env.example' to 'repl.env' and edit it, or set REPL_ENV_FILE." >&2
     echo "       Operation aborted." >&2
     exit 1
 fi
 
-# Export every value defined in the config so that libpq (PGHOST/PGPORT/...)
-# and child processes inherit it. The config uses the ${VAR:-default} form, so
-# any value already present in the environment still takes precedence.
+# Export every value so that libpq (PGHOST/PGPORT/...) and child processes
+# inherit it. Both files use the ${VAR:-default} form, so any value already
+# present in the environment still takes precedence. Script defaults load first,
+# then the site environment.
 set -a
+# shellcheck source=/dev/null
+. "$REPL_SCRIPT_ENV_FILE"
 # shellcheck source=/dev/null
 . "$REPL_ENV_FILE"
 set +a

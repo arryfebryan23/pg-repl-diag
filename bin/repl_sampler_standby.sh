@@ -10,7 +10,7 @@
 #   $METRICS_DIR/standby_metrics.csv
 #   $BURST_DIR/burst_standby_<ts>.txt
 #
-# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 #
 # USAGE:
 #   bin/repl_sampler_standby.sh
@@ -21,7 +21,7 @@
 # -----------------------------------------------------------------------------
 set -u
 
-# Load central configuration (repl.env) and validation helpers.
+# Load central configuration (repl.script.env + repl.env) and validation helpers.
 # shellcheck source=../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
 

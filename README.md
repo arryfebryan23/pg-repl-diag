@@ -15,8 +15,9 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
 
 ```
 .
-├── repl.env.example     # configuration template (committed)
-├── repl.env             # your local configuration (git-ignored; copy of the example)
+├── repl.script.env      # SCRIPT/toolkit behaviour: output, logging, cadence, appearance (committed)
+├── repl.env.example     # ENVIRONMENT template: PostgreSQL/OS/topology (committed)
+├── repl.env             # your local environment config (git-ignored; copy of the example)
 ├── bin/                 # executable scripts run by operators
 │   ├── repl_collect.sh
 │   ├── repl_network_diag.sh
@@ -35,9 +36,18 @@ dependencies** (only `bash`, `psql`, `python3`; `iostat`/`mpstat` from the
     └── log/             # per-run console logs (stdout+stderr of each command)
 ```
 
-All tunables live in **one** place — `repl.env`. Scripts never embed
-configuration values; they load `repl.env` via `lib/repl_common.sh` and **abort**
-if a variable an operation depends on is missing.
+Configuration is split by concern across **two** files, both loaded via
+`lib/repl_common.sh`, which **aborts** if a variable an operation depends on is
+missing:
+
+- **`repl.script.env`** — *script / toolkit behaviour* (output dirs, logging,
+  sampling cadence, thresholds, console appearance). Identical on every node and
+  committed to git.
+- **`repl.env`** — *deployment environment* (PostgreSQL connection, target /
+  peer IPs, link bandwidth). Site-specific, copied from `repl.env.example`, and
+  git-ignored so site values are never committed.
+
+Scripts never embed configuration values.
 
 ---
 
@@ -58,18 +68,27 @@ if a variable an operation depends on is missing.
 
 ```bash
 cp repl.env.example repl.env
-$EDITOR repl.env          # adjust connection, output paths, and tunables
+$EDITOR repl.env          # adjust connection + topology for THIS node
+# (toolkit behaviour lives in repl.script.env and rarely needs changes)
 ```
 
-`repl.env` is sourced by bash and uses the `VAR="${VAR:-default}"` form, so any
+Both files are sourced by bash and use the `VAR="${VAR:-default}"` form, so any
 value already exported in the environment still takes precedence — per-invocation
 overrides keep working, e.g. `INTERVAL=5 bin/repl_sampler_standby.sh`.
 
-Key settings (full list in `repl.env.example`):
+**Environment** — site-specific (`repl.env`, from `repl.env.example`):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` | libpq defaults | PostgreSQL connection |
+| `TARGET` | *(empty, required for network test)* | standby IP running `iperf3 -s` |
+| `LINK_MBPS` | 1000 | this link's per-direction bandwidth (Mbps), for the BDP calc |
+| `PEERS` | *(empty, optional)* | space-separated peer IPs for RTT in the collector |
+
+**Script / toolkit** — same on every node (`repl.script.env`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
 | `OUTPUT_DIR` | `./output` | root for all generated artifacts |
 | `METRICS_DIR` / `REPORTS_DIR` / `BURST_DIR` / `DASHBOARD_DIR` | under `OUTPUT_DIR` | per-type output folders |
 | `LOG_DIR` | `$OUTPUT_DIR/log` | per-run console logs (every command mirrors stdout+stderr here; set `REPL_NO_LOG=1` to disable) |
@@ -78,9 +97,7 @@ Key settings (full list in `repl.env.example`):
 | `BURST_COOLDOWN` | 120 | minimum gap between bursts (s) |
 | `COUNT` | 0 | 0 = sampler runs indefinitely; >0 = stop after N samples |
 | `APPLY_INTERVAL` / `APPLY_COUNT` | 5 / 12 | cadence of the on-demand apply probe |
-| `TARGET` | *(empty, required)* | standby IP for the network test (`iperf3 -s`) |
-| `IPERF_PORT` / `DURATION` / `PARALLEL` / `LINK_MBPS` / `WAL_SAMPLE` | 5201 / 20 / 8 / 1000 / 15 | network test parameters |
-| `PEERS` | *(empty, optional)* | space-separated peer IPs for RTT in the collector |
+| `IPERF_PORT` / `DURATION` / `PARALLEL` / `WAL_SAMPLE` | 5201 / 20 / 8 / 15 | network test parameters |
 | `REPL_TOOLKIT_NAME` / `REPL_TOOLKIT_VERSION` | toolkit name / `1.0` | shown in the console banner of every script |
 | `REPL_WIDTH` | 74 | banner / rule width in columns |
 | `REPL_COLOR` | `auto` | `auto` (color only on a terminal) / `always` / `never` |
@@ -149,8 +166,8 @@ bin/repl_apply_diag.sh                  # on the standby
 ### 4) Generate the dashboard
 Collect the CSVs from each node into `output/metrics/`, then:
 ```bash
-# load the output paths from repl.env, then render:
-set -a; . ./repl.env; set +a
+# load the output paths (from repl.script.env), then render:
+set -a; . ./repl.script.env; . ./repl.env; set +a
 python3 bin/repl_dashboard.py
 # or explicitly:
 python3 bin/repl_dashboard.py --metrics-dir ./output/metrics --burst-dir ./output/bursts \

@@ -8,12 +8,12 @@ vanilla-JS canvas code, so the resulting HTML is 100% offline and safe to open
 on air-gapped servers.
 
 CONFIGURATION: default input/output directories are read from the environment
-(METRICS_DIR, BURST_DIR, DASHBOARD_DIR — set in repl.env) and can be overridden
-with CLI flags.
+(METRICS_DIR, BURST_DIR, DASHBOARD_DIR — set in repl.script.env) and can be
+overridden with CLI flags.
 
 USAGE:
-  # using directories from repl.env:
-  set -a; . ./repl.env; set +a
+  # using directories from repl.script.env:
+  set -a; . ./repl.script.env; . ./repl.env; set +a
   python3 bin/repl_dashboard.py
   # or explicitly:
   python3 bin/repl_dashboard.py --metrics-dir ./output/metrics --burst-dir ./output/bursts \\
@@ -60,7 +60,7 @@ def summarize(vals):
     return {"last": ys[-1], "max": max(ys), "avg": round(sum(ys)/len(ys), 2)}
 
 # ---------------------------------------------------------------------------
-# Defaults follow the output layout from repl.env; fall back to ./output/*.
+# Defaults follow the output layout from repl.script.env; fall back to ./output/*.
 DEF_METRICS   = os.environ.get("METRICS_DIR", "./output/metrics")
 DEF_BURST     = os.environ.get("BURST_DIR", "./output/bursts")
 DEF_DASHBOARD = os.environ.get("DASHBOARD_DIR", "./output/dashboards")

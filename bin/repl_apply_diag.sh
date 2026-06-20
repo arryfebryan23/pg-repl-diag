@@ -21,7 +21,7 @@
 #   - wait_event   : what the startup process is waiting on (I/O? conflict?)
 #   - disk %util   : utilization of the busiest disk (via iostat)
 #
-# CONFIGURATION: all tunables live in repl.env (see repl.env.example).
+# CONFIGURATION: behaviour in repl.script.env, environment in repl.env (see repl.env.example).
 # Cadence is controlled by APPLY_INTERVAL / APPLY_COUNT.
 #
 # USAGE (on the standby):
@@ -31,7 +31,7 @@
 
 set -u
 
-# Load central configuration (repl.env), validation helpers, and the shared
+# Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
 # shellcheck source=../lib/repl_common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/repl_common.sh"
