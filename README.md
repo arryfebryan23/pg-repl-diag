@@ -118,12 +118,97 @@ e.g. `repl_network_diag.sh` refuses to run without `TARGET`.
 
 ## Prerequisites
 
+### Platform
+
+**Linux only.** The scripts read `/proc`, `/sys`, and `net.ipv4.*` sysctls and rely
+on `iproute2` / `sysstat`, so they do **not** run on macOS or Windows. Run them
+directly on the PostgreSQL hosts (Primary, local standby, remote DR standby) — the
+host is where the disk, CPU, and TCP socket being diagnosed actually live.
+`bash` **4+** is required (the scripts use arrays, `mapfile`, and process substitution).
+
+### OS user
+
+Run the scripts as the **`postgres`** OS user (or `root`). This is needed so that:
+
+- `postgresql.auto.conf` inside `data_directory` is readable (collector §19);
+- the redo/`startup` process CPU can be read from `/proc/<pid>/stat`
+  (standby sampler `cpu_startup_pct` column);
+- `ss -tinp` can show the **PID** owning the replication socket;
+- `ethtool` (NIC speed/duplex) works — it needs root.
+
+Running as an unrelated user does not crash the scripts, but the items above are
+silently reported as unavailable.
+
+### Database access & privileges
+
+- Connect via libpq env vars (`PGHOST` / `PGPORT` / `PGUSER` / `PGDATABASE` in `repl.env`).
+- Put the password in **`~/.pgpass`** (`chmod 600`) — never in `repl.env`.
+- The role needs read access to the monitoring views. Grant **`pg_monitor`**
+  (`GRANT pg_monitor TO youruser;`) or use a superuser. Without it, `client_addr`,
+  `wait_event`, and query text in `pg_stat_activity` / `pg_stat_replication` are
+  hidden, which weakens the apply-side and socket diagnosis.
+- All queries are **strictly read-only**.
+- **PostgreSQL 12+** works; **14+** recommended (`pg_stat_wal`). `pg_stat_checkpointer`
+  (PG17+) and a few view columns are version-gated and skipped gracefully on older releases.
+
+### Ports & firewall
+
+| Port | Direction | Used by | Required? |
+|------|-----------|---------|-----------|
+| **5432** (`PGPORT`) | standby → primary | streaming replication **and** every script's `psql` | **Yes** |
+| **5201** (`IPERF_PORT`) | primary → standby | `repl_network_diag.sh` only | Only for the network test |
+| **ICMP** (ping) | primary ↔ standby | RTT / packet-loss baseline in the collector & network test | Recommended |
+
+For the network test, start `iperf3 -s` on the standby (listening on `IPERF_PORT`,
+default 5201) and make sure that port is reachable from the Primary.
+
+### Required packages / commands
+
+Present on a standard Linux + PostgreSQL install; listed for completeness:
+
+| Package | Provides | Why it's needed |
+|---------|----------|-----------------|
+| `bash` (4+) | shell | arrays / `mapfile` / process substitution |
+| postgresql client | `psql` | every script queries the DB |
+| `python3` | `python3` | JSON parsing (iperf3) and float math |
+| coreutils + `awk`/`sed`/`grep` | `date`, `df`, `hostname`, `getconf`, … | text processing & math |
+| `procps` | `ps`, `sysctl`, `free` | process lookup, TCP sysctls, memory |
+| `iproute2` | `ss`, `ip` | replication-socket RTT/retransmits, addressing |
+
+**Required only for `repl_network_diag.sh`:**
+
+| Package | Provides | Note |
+|---------|----------|------|
+| `iperf3` | `iperf3` | needed on **both** Primary (client) and standby (`iperf3 -s`) |
+| `iputils` | `ping` | RTT & packet-loss baseline |
+
+### Optional packages — what you lose without them
+
+Everything below degrades gracefully; the scripts keep running and only the
+listed data goes uncollected.
+
+| Package | Command | Used for | If missing |
+|---------|---------|----------|------------|
+| `sysstat` | `iostat` | disk `%util` / `await` / busiest device | `disk_util` / `disk_dev` / `disk_await` recorded as `0` / `-`; the **"DISK I/O" apply-side root cause cannot be confirmed** |
+| `sysstat` | `mpstat` | per-core CPU inside standby **burst captures** | that block is omitted from `burst_standby_*.txt` |
+| `util-linux` | `lscpu` | CPU model / per-core clock (collector §2) | falls back to `/proc/cpuinfo` |
+| `util-linux` | `lsblk` | block devices / I/O scheduler (collector §4) | section skipped |
+| `ethtool` | `ethtool` | NIC speed/duplex/ring buffers (collector §6) | shows "(ethtool not available)" |
+| `chrony` / `ntp` | `chronyc` / `ntpq` | clock-sync check — skew invalidates lag numbers (collector §7) | warns; verify the three nodes share a synced clock manually |
+| `net-tools` | `netstat` | global retransmit counters (collector §8) | line skipped (`ss` still gives per-socket data) |
+
+### Install
+
 ```bash
 # RHEL/Rocky
-sudo yum install -y sysstat iperf3
+sudo yum install -y sysstat iperf3 ethtool chrony
 # Debian/Ubuntu
-sudo apt-get install -y sysstat iperf3
+sudo apt-get install -y sysstat iperf3 ethtool chrony
 ```
+
+> `iperf3` is only needed if you run the network test. `sysstat` is the most
+> impactful optional package — without `iostat` you cannot distinguish a
+> **disk-bound** standby from a **CPU-bound** one.
 
 ---
 
