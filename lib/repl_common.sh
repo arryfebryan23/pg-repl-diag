@@ -81,6 +81,35 @@ ensure_dir() {
     for d in "$@"; do mkdir -p "$d"; done
 }
 
+# iostat_peak — from a single 1-second iostat sample, echo "max_%util device await"
+# for the busiest disk. Echoes "0 - 0" when iostat is not installed. Self-contained
+# (no globals), so every sampler/probe shares one implementation.
+# NOTE: this call BLOCKS for ~1s, so a sampler's real cadence is INTERVAL + ~1s.
+iostat_peak() {
+    command -v iostat >/dev/null 2>&1 || { echo "0 - 0"; return; }
+    iostat -dxy 1 1 2>/dev/null | awk '
+      /^Device/ { for(i=1;i<=NF;i++){ if($i=="%util")u=i; if($i=="await")a=i; if($i=="w_await")w=i } next }
+      NF>3 && u>0 { v=$u+0; if(v>m){m=v;d=$1;aw=(a?$a+0:(w?$w+0:0))} }
+      END{ printf "%.1f %s %.1f", m+0,(d==""?"-":d),aw+0 }'
+}
+
+# single_instance NAME — guarantee only ONE copy of a long-running command runs.
+# Takes a non-blocking flock on a per-NAME lockfile under LOG_DIR and aborts if it
+# is already held (e.g. a forgotten background sampler). The lock is released
+# automatically when the process exits (fd 9 stays open for its lifetime).
+# Best-effort: if flock is unavailable the guard is skipped silently.
+# Pass a NAME that is UNIQUE PER NODE (e.g. the CSV basename) so that nodes sharing
+# a bind-mounted lock directory do not block each other.
+single_instance() {
+    local name="$1"
+    local dir="${LOG_DIR:-${OUTPUT_DIR:-/tmp}}"
+    mkdir -p "$dir" 2>/dev/null || dir="/tmp"
+    local lock="${dir}/.${name}.lock"
+    command -v flock >/dev/null 2>&1 || return 0
+    exec 9>"$lock" 2>/dev/null || return 0
+    flock -n 9 || die "another '${name}' instance is already running (lock: ${lock})."
+}
+
 # -----------------------------------------------------------------------------
 # Per-run logging
 # -----------------------------------------------------------------------------

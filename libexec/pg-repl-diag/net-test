@@ -25,6 +25,31 @@
 
 set -u
 
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+pg-repl-diag net-test — single-stream vs parallel link test (run ON THE PRIMARY)
+
+Usage:
+  1. On the receiving standby:  iperf3 -s
+  2. On the primary:            pg-repl-diag net-test [standby-ip]
+
+The standby-ip argument overrides TARGET from repl.env. Compares 1-stream
+throughput (mirrors replication) against N-stream throughput (true link
+capacity), measures RTT/loss, samples the WAL rate, and prints a tuning verdict.
+
+Key environment (repl.script.env / repl.env):
+  TARGET        standby IP running 'iperf3 -s' (REQUIRED; or pass as argument)
+  IPERF_PORT    iperf3 server port (default 5201)
+  DURATION      seconds per iperf3 test (default 20)
+  PARALLEL      streams for the capacity test (default 8)
+  LINK_MBPS     link bandwidth per direction, for the BDP calc (default 1000)
+  WAL_SAMPLE    seconds to sample WAL generation rate (default 15)
+  PGDATABASE    libpq connection (PGHOST/PGPORT/PGUSER via env or ~/.pgpass)
+EOF
+    exit 0 ;;
+esac
+
 # Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
 # shellcheck source=../../lib/repl_common.sh

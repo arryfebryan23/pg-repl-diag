@@ -27,9 +27,33 @@
 # USAGE (on the standby):
 #   pg-repl-diag apply-check
 #   APPLY_INTERVAL=5 APPLY_COUNT=24 pg-repl-diag apply-check   # override for 2 minutes
+#
+# NOTE: each sample takes a 1-second iostat reading, so the real spacing between
+# rows is APPLY_INTERVAL + ~1s.
 # -----------------------------------------------------------------------------
 
 set -u
+
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+pg-repl-diag apply-check — apply-side (disk/CPU vs network) probe (run ON THE STANDBY)
+
+Usage:
+  pg-repl-diag apply-check
+  APPLY_INTERVAL=5 APPLY_COUNT=24 pg-repl-diag apply-check
+
+Samples receive/replay LSN, apply gap, arrival vs apply rate, startup wait event
+and disk %util for APPLY_COUNT iterations, then prints a verdict (APPLY-BOUND on
+disk/CPU/conflict, NETWORK-bound, or HEALTHY). Read-only.
+
+Key environment (repl.script.env / repl.env, overridable per invocation):
+  APPLY_INTERVAL    seconds between samples (default 5; real spacing +~1s for iostat)
+  APPLY_COUNT       number of samples (default 12 -> ~1 minute)
+  PGDATABASE        libpq connection (PGHOST/PGPORT/PGUSER via env or ~/.pgpass)
+EOF
+    exit 0 ;;
+esac
 
 # Load central configuration (repl.script.env + repl.env), validation helpers, and the shared
 # presentation layer (run_header/section/kv/verdict/...).
@@ -56,17 +80,7 @@ PSQL="psql -d ${PGDB} -At -X -q -F|"
 IN_REC="$($PSQL -c "SELECT pg_is_in_recovery();" 2>/dev/null)" || die "Failed to connect via psql. Check PGHOST/PGUSER/.pgpass."
 [ "$IN_REC" = "t" ] || die "This host is NOT a standby (pg_is_in_recovery=false). Run it on the standby."
 
-# Helper: from a 1-second iostat sample, return the highest %util, its device, and await
-iostat_peak() {
-    [ "$HAS_IOSTAT" = "0" ] && { echo "0 - 0"; return; }
-    iostat -dxy 1 1 2>/dev/null | awk '
-        /^Device/ { for(i=1;i<=NF;i++){ if($i=="%util")u=i; if($i=="await")a=i; if($i=="w_await")w=i } next }
-        NF>3 && u>0 {
-            util=$u+0
-            if(util>maxu){ maxu=util; dev=$1; aw=(a? $a+0 : (w? $w+0 : 0)) }
-        }
-        END{ printf "%.1f %s %.1f", maxu+0, (dev==""?"-":dev), aw+0 }'
-}
+# iostat_peak() (busiest disk: %util device await) is shared via lib/repl_common.sh.
 
 run_header "STANDBY APPLY-SIDE DIAGNOSIS"
 kv "Sampling" "${INTERVAL}s x ${COUNT}"
